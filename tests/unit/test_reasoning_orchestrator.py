@@ -165,3 +165,11 @@ def test_circuit_breaker_triggers_fallback():
     run(orch.analyze_transactions([SAMPLE_TX], use_reasoning=True))
     orch.llm.generate_json.assert_not_called()
     orch._fallback_analysis.assert_called_once()
+
+
+def test_reasoning_does_not_require_python_311_timeout_context_manager(monkeypatch):
+    monkeypatch.delattr(asyncio, 'timeout', raising=False)
+    orch = _make_orchestrator(HIGH_CONF_RESPONSE)
+    signals = run(orch.analyze_transactions([SAMPLE_TX]))
+    assert signals[0]['source'] == 'reasoning_agent'
+    assert signals[0]['provenance']['origin'] == 'ai'

@@ -136,10 +136,9 @@ Respond with a JSON object containing:
 
         try:
             # Run reasoning loop with timeout
-            async with asyncio.timeout(self.config.reasoning_timeout):
-                results = await self._reasoning_loop(transactions)
-                self.consecutive_failures = 0  # Reset on success
-                return results
+            results = await asyncio.wait_for(self._reasoning_loop(transactions), self.config.reasoning_timeout)
+            self.consecutive_failures = 0  # Reset on success
+            return results
 
         except asyncio.TimeoutError:
             logger.warning(f"Reasoning timeout after {self.config.reasoning_timeout}s")
