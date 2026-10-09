@@ -11,34 +11,37 @@ logger = logging.getLogger(__name__)
 class LLMConfig:
     """Configuration for LLM providers"""
 
-    def __init__(self):
+    def __init__(self, env=None):
         """Load configuration from environment variables"""
 
+        from src.config.settings import normalized_ai_env, boolean
+        values = normalized_ai_env(os.environ if env is None else env)
+
         # Primary provider
-        self.provider = os.getenv("LLM_PROVIDER", "lmstudio").lower()
+        self.provider = values.get("LLM_PROVIDER", "ollama").lower()
 
         # Enable/disable reasoning agent
-        self.enable_reasoning = os.getenv("ENABLE_REASONING", "true").lower() == "true"
+        self.enable_reasoning = boolean(values, "ENABLE_REASONING", False)
 
         # Reasoning parameters
-        self.max_reasoning_iterations = int(os.getenv("MAX_REASONING_ITERATIONS", "5"))
-        self.reasoning_timeout = int(os.getenv("REASONING_TIMEOUT", "30"))
+        self.max_reasoning_iterations = int(values.get("MAX_REASONING_ITERATIONS", "5"))
+        self.reasoning_timeout = int(values.get("REASONING_TIMEOUT", "30"))
 
         # LMStudio configuration
-        self.lmstudio_url = os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")
-        self.lmstudio_model = os.getenv("LMSTUDIO_MODEL", "local-model")
+        self.lmstudio_url = values.get("LMSTUDIO_URL", "http://localhost:1234/v1")
+        self.lmstudio_model = values.get("LMSTUDIO_MODEL", "local-model")
 
         # Ollama configuration
-        self.ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
-        self.ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+        self.ollama_url = values.get("OLLAMA_URL", "http://localhost:11434")
+        self.ollama_model = values.get("OLLAMA_MODEL", "llama3.1:8b")
 
         # Claude configuration
-        self.claude_api_key = os.getenv("CLAUDE_API_KEY")
-        self.claude_model = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+        self.claude_api_key = values.get("CLAUDE_API_KEY")
+        self.claude_model = values.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
 
         # OpenAI configuration
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        self.openai_api_key = values.get("OPENAI_API_KEY")
+        self.openai_model = values.get("OPENAI_MODEL", "gpt-4o")
 
         # Fallback chain
         self.fallback_providers = self._build_fallback_chain()

@@ -1,0 +1,14 @@
+SentryCage — DEMO — dati sintetici / synthetic data
+EVENT: {"blockNumber": "12345678", "from": "0x1111111111111111111111111111111111111111", "hash": "0xabababababababababababababababababababababababababababababababab", "input": "0x", "isError": "0", "timeStamp": "1791547200", "to": "0x5a52e96bacdabb82fd05763e25335261b270efcb", "value": "500000000000000000000"}
+ALERT — DEMO — dati sintetici / synthetic data
+🟢 <b>ACCUMULATION SIGNAL</b> ⭐⭐⭐
+
+Whale wallet accumulating 500.00 ETH
+
+💰 <b>500.00 ETH</b>
+👛 <a href="https://etherscan.io/address/0x5a52e96bacdabb82fd05763e25335261b270efcb">Alameda Research</a> · whale
+⛓️ Ethereum · 🕐 2026-10-09 21:40
+🔗 <a href="https://etherscan.io/tx/0xabababababababababababababababababababababababababababababababab">View transaction ↗</a>
+
+SIGNAL: accumulation | 500.00 ETH | confidence 0.90
+SQLITE: 1 signal saved and read back; isolated temporary database removed on exit

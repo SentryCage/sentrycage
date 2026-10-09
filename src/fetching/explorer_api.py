@@ -4,6 +4,7 @@ Migrated to V2 unified endpoint with chainid parameter support
 """
 from typing import Dict, List, Any, Optional
 import logging
+import os
 
 import requests
 
@@ -12,6 +13,22 @@ from src.config.wallet_registry import Chain
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
+class ExplorerError(RuntimeError):
+    pass
+
+
+class ExplorerTimeout(ExplorerError):
+    pass
+
+
+class InvalidExplorerResponse(ExplorerError):
+    pass
+
+
+class IncompleteExplorerScan(ExplorerError):
+    pass
+
 
 class ExplorerAPIClient:
     """Client for interacting with Etherscan API V2 (unified multichain endpoint)"""
@@ -25,12 +42,14 @@ class ExplorerAPIClient:
         Chain.ARBITRUM: 42161
     }
     
-    def __init__(self):
+    def __init__(self, api_key=None, timeout=10):
         """Initialize the explorer API client"""
+        self.api_key = api_key if api_key is not None else os.getenv('ETHERSCAN_API_KEY', ETHERSCAN_API_KEY)
+        self.timeout = timeout
         self.session = requests.Session()
 
         # Check if API key is configured (V2 uses single key for all chains)
-        if not ETHERSCAN_API_KEY:
+        if not self.api_key:
             logger.warning("No Etherscan API key configured. Set ETHERSCAN_API_KEY in your environment.")
     
     def _make_request(
@@ -50,44 +69,56 @@ class ExplorerAPIClient:
         Returns:
             API response data
         """
-        # Get chainid for the specified chain
         chain_id = self.CHAIN_IDS.get(chain)
-
-        if not chain_id:
-            logger.error(f"Unsupported chain: {chain.value}")
-            return {"status": "0", "message": f"Unsupported chain: {chain.value}"}
-
-        if not ETHERSCAN_API_KEY:
-            logger.error("Missing Etherscan API key")
-            return {"status": "0", "message": "Missing API key"}
-
-        # Build request parameters for V2 API
+        if chain_id is None:
+            raise ExplorerError('Unsupported explorer chain')
+        if not self.api_key:
+            raise ExplorerError('ETHERSCAN_API_KEY is missing')
         request_params = {
-            "chainid": chain_id,  # V2 requires chainid parameter
-            "module": "account" if "txlist" in action else "proxy",
-            "action": action,
-            "apikey": ETHERSCAN_API_KEY
+            'chainid': chain_id,
+            'module': 'account' if action in ('txlist', 'txlistinternal', 'tokentx') else 'proxy',
+            'action': action,
+            'apikey': self.api_key,
         }
-
-        if params:
-            request_params.update(params)
-
+        request_params.update(params or {})
         try:
-            response = self.session.get(self.BASE_URL, params=request_params)
+            response = self.session.get(self.BASE_URL, params=request_params, timeout=self.timeout)
             response.raise_for_status()
-
             data = response.json()
+        except requests.Timeout:
+            raise ExplorerTimeout('Explorer request timed out; retry or check connectivity') from None
+        except ValueError:
+            raise InvalidExplorerResponse('Explorer returned invalid JSON') from None
+        except requests.RequestException:
+            raise ExplorerError('Explorer HTTP/connection error; check access and connectivity') from None
+        if not isinstance(data, dict):
+            raise InvalidExplorerResponse('Explorer returned a non-object response')
+        if 'error' in data:
+            raise ExplorerError('Explorer returned an API error; check key and service access')
+        if data.get('status') == '0' and data.get('message') != 'No transactions found':
+            raise ExplorerError('Explorer rejected request; check key, rate limits and chain access')
+        return data
 
-            # Check for API errors
-            if data.get("status") == "0" and data.get("message") != "No transactions found":
-                logger.warning(f"API error: {data.get('message')} for {chain.value} (chainid={chain_id})")
+    def _transaction_result(self, response):
+        result = response.get('result')
+        if response.get('status') == '0' and response.get('message') == 'No transactions found' and result == []:
+            return []
+        if response.get('status') != '1' or not isinstance(result, list):
+            raise InvalidExplorerResponse('Explorer transaction result must be a successful list')
+        for tx in result:
+            if not isinstance(tx, dict) or not all(key in tx for key in ('hash', 'from', 'to', 'value')):
+                raise InvalidExplorerResponse('Explorer returned an incomplete transaction')
+            try:
+                if not isinstance(tx['hash'], str) or not tx['hash'] or not isinstance(tx['from'], str):
+                    raise ValueError
+                if tx['to'] is not None and not isinstance(tx['to'], str):
+                    raise ValueError
+                if int(tx['value']) < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise InvalidExplorerResponse('Explorer returned invalid transaction fields') from None
+        return result
 
-            return data
-
-        except requests.RequestException as e:
-            logger.error(f"Request error for {chain.value} (chainid={chain_id}): {str(e)}")
-            return {"status": "0", "message": f"Request error: {str(e)}"}
-    
     def get_wallet_transactions(
         self, 
         address: str, 
@@ -124,16 +155,8 @@ class ExplorerAPIClient:
         
         response = self._make_request(chain, "txlist", params)
         
-        if response.get("status") == "1":
-            return response.get("result", [])
-        
-        # Handle "No transactions found" gracefully
-        if response.get("message") == "No transactions found":
-            return []
-            
-        logger.warning(f"Failed to get transactions for {address} on {chain.value}: {response.get('message')}")
-        return []
-    
+        return self._transaction_result(response)
+
     def get_token_transfers(
         self,
         address: str,
@@ -178,16 +201,8 @@ class ExplorerAPIClient:
             
         response = self._make_request(chain, action, params)
         
-        if response.get("status") == "1":
-            return response.get("result", [])
-            
-        # Handle "No transactions found" gracefully
-        if response.get("message") == "No transactions found":
-            return []
-            
-        logger.warning(f"Failed to get token transfers for {address} on {chain.value}: {response.get('message')}")
-        return []
-    
+        return self._transaction_result(response)
+
     def get_internal_transactions(
         self,
         address: str,
@@ -224,12 +239,4 @@ class ExplorerAPIClient:
         
         response = self._make_request(chain, "txlistinternal", params)
         
-        if response.get("status") == "1":
-            return response.get("result", [])
-            
-        # Handle "No transactions found" gracefully
-        if response.get("message") == "No transactions found":
-            return []
-            
-        logger.warning(f"Failed to get internal transactions for {address} on {chain.value}: {response.get('message')}")
-        return []
+        return self._transaction_result(response)

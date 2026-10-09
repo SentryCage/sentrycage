@@ -17,19 +17,15 @@ logger = logging.getLogger(__name__)
 class BlockchainClient:
     """Client for interacting with blockchain networks"""
     
-    def __init__(self):
+    def __init__(self, settings=None):
         """Initialize blockchain connections"""
-        self._clients: Dict[Chain, Web3] = {
-            Chain.ETHEREUM: Web3(Web3.HTTPProvider(ETHEREUM_RPC_URL)),
-            Chain.ARBITRUM: Web3(Web3.HTTPProvider(ARBITRUM_RPC_URL))
-        }
-
-        # Cache last processed block numbers
-        self._last_blocks: Dict[Chain, int] = {}
-
-        # Chain disponibili dopo la validazione (degrada gracefully se RPC non configurato)
-        self._available_chains: set = set()
-        self._validate_connections()
+        urls = settings.rpc_urls if settings else {
+            Chain.ETHEREUM: ETHEREUM_RPC_URL, Chain.ARBITRUM: ARBITRUM_RPC_URL}
+        timeout = settings.request_timeout if settings else 10
+        self._clients = {chain: Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': timeout}))
+                         for chain, url in urls.items() if url}
+        self._last_blocks = {}
+        self._available_chains = set()
 
     def _validate_connections(self) -> None:
         """Valida connessioni RPC e degrada gracefully se non disponibili.
@@ -52,6 +48,9 @@ class BlockchainClient:
         """Verifica se la connessione RPC per la chain è attiva."""
         return chain in self._available_chains
     
+    def get_chain_id(self, chain: Chain) -> int:
+        return self._clients[chain].eth.chain_id
+
     def get_latest_block_number(self, chain: Chain) -> int:
         """
         Get the latest block number for the specified chain

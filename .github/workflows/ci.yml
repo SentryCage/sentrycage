@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  PYTHON_VERSION: "3.11"
+  PYTHON_VERSION: "3.12"
 
 jobs:
 
@@ -29,7 +29,7 @@ jobs:
         run: pip install flake8==7.1.1
 
       - name: Run flake8
-        run: flake8 src/
+        run: flake8 src/ main.py
 
   # ──────────────────────────────────────────
   # Tests
@@ -57,8 +57,14 @@ jobs:
         env:
           DB_PATH: ":memory:"
 
-      - name: Check coverage threshold (Python 3.11 only)
-        if: matrix.python-version == '3.11'
+      - name: Offline demo and startup/delivery regressions
+        run: |
+          test ! -f .env
+          python main.py --demo
+          pytest tests/integration/test_offline_demo.py tests/integration/test_runtime_pipeline.py tests/integration/test_diagnostics.py tests/unit/test_runtime_settings.py tests/unit/test_telegram_delivery.py tests/unit/test_acquisition_errors.py -q
+
+      - name: Check coverage threshold (Python 3.12 only)
+        if: matrix.python-version == '3.12'
         # Baseline post-FOSS (2026-08-24): la rimozione del layer licensing
         # ha eliminato i test che coprivano quella area (43% attuale).
         # Obiettivo dichiarato: risalire al 70% coprendo reasoning e fetch.
@@ -78,23 +84,15 @@ jobs:
       - name: Build image
         run: docker build -t sentrycage:ci .
 
-      - name: Smoke test — imports and DB init
+      - name: Credential-free demo with network disabled
+        run: docker run --rm --network none sentrycage:ci python main.py --demo
+
+      - name: SQLite volume survives container recreation
         run: |
-          docker run --rm \
-            -e DB_PATH=/tmp/test.db \
-            -e ETHERSCAN_API_KEY=dummy \
-            -e TELEGRAM_BOT_TOKEN=dummy \
-            -e TELEGRAM_CHAT_ID=0 \
-          sentrycage:ci \
-          python -c "
-          from src.database.sqlite import init_db
-          from src.config.license import get_active_features
-          init_db('/tmp/test.db')
-          f = get_active_features(db_path='/tmp/test.db')
-          print('Tier:', f.display_tier)
-          assert f.tier == 'open-source', f'Unexpected tier: {f.tier}'
-          print('CI smoke test passed')
-          "
+          docker volume create sentrycage-ci-data
+          docker run --rm --network none -v sentrycage-ci-data:/app/data sentrycage:ci python -c "from src.database.sqlite import init_db, set_config; init_db(); set_config('persistence_probe', 'ci')"
+          docker run --rm --network none -v sentrycage-ci-data:/app/data sentrycage:ci python -c "from src.database.sqlite import get_config; assert get_config('persistence_probe') == 'ci'"
+          docker volume rm sentrycage-ci-data
 
   # ──────────────────────────────────────────
   # License CLI check

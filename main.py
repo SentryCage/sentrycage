@@ -1,284 +1,160 @@
-"""
-Main entry point for the Blockchain Wallet Analysis application
-"""
+"""SentryCage CLI and live acquisition coordinator."""
+from __future__ import annotations
+import argparse
 import asyncio
 import logging
-import time
-from typing import List, Dict, Any
-import argparse
 import os
 from datetime import datetime
-
-from src.config.settings import POLLING_INTERVAL
-from src.config.wallet_registry import ALL_WALLETS, Chain
-from src.config.llm_config import LLMConfig
-from src.fetching.blockchain_client import BlockchainClient
-from src.fetching.explorer_api import ExplorerAPIClient
-from src.analysis.transaction_analyzer import TransactionAnalyzer
-from src.signals.signal_generator import SignalGenerator, Signal, SignalType, SignalStrength
-from src.signals.enhanced_signal import EnhancedSignal, create_signal_from_analysis
-from src.notifications.telegram_bot import TelegramNotifier
-from src.reasoning.agent_orchestrator import ReasoningAgentOrchestrator
-from src.database import init_db, save_signal, is_tx_processed, mark_tx_processed, cleanup_old_transactions
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('whale_tracker.log')
-    ]
-)
+from typing import List
 
 logger = logging.getLogger(__name__)
 
+
 class WhaleTracker:
-    """Main application class that coordinates all components"""
-    
-    def __init__(self):
-        """Initialize the application components"""
-        self.blockchain_client = BlockchainClient()
-        self.explorer_client = ExplorerAPIClient()
-        self.transaction_analyzer = TransactionAnalyzer()
-        self.signal_generator = SignalGenerator()
-        self.telegram_notifier = TelegramNotifier()
-
-        # Initialize AI reasoning agent
-        try:
-            self.llm_config = LLMConfig()
+    def __init__(self, settings=None, *, blockchain_client=None, explorer_client=None,
+                 storage=None, recipient=None):
+        from src.config.settings import Settings
+        self.settings = settings if settings is not None else Settings.from_env()
+        from src.fetching.blockchain_client import BlockchainClient
+        from src.fetching.explorer_api import ExplorerAPIClient
+        from src.notifications.telegram_bot import TelegramNotifier
+        from src.orchestration.pipeline import TransactionPipeline, SQLiteStorage
+        self.blockchain_client = blockchain_client if blockchain_client is not None else BlockchainClient(self.settings)
+        self.explorer_client = explorer_client if explorer_client is not None else ExplorerAPIClient(
+            self.settings.etherscan_api_key, self.settings.request_timeout)
+        self.telegram_notifier = recipient if recipient is not None else TelegramNotifier(
+            token=self.settings.telegram_token, chat_id=self.settings.telegram_chat_id,
+            enabled=self.settings.notifications_enabled, timeout=self.settings.request_timeout)
+        self.reasoning_agent = None
+        self.llm_config = None
+        if self.settings.enable_reasoning:
+            from src.reasoning.agent_orchestrator import ReasoningAgentOrchestrator
+            from src.config.llm_config import LLMConfig
+            self.llm_config = LLMConfig(self.settings.llm_env)
             self.reasoning_agent = ReasoningAgentOrchestrator(self.llm_config)
-            logger.info("✅ AI Reasoning Agent initialized")
-        except Exception as e:
-            logger.warning(f"⚠️ AI Reasoning Agent not available: {str(e)}")
-            self.reasoning_agent = None
+        self.storage = storage if storage is not None else SQLiteStorage(self.settings.db_path)
+        self.pipeline = TransactionPipeline(self.storage, self.telegram_notifier,
+                                            threshold=self.settings.transaction_threshold,
+                                            reasoning_agent=self.reasoning_agent)
+        self.transaction_analyzer = self.pipeline.analyzer
+        self.signal_generator = self.pipeline.generator
+        self.last_processed_blocks = {}
 
-        # Track the latest processed block for each chain
-        self.last_processed_blocks: Dict[Chain, int] = {}
-
-        # Inizializza DB SQLite locale (crea file e schema se non esistono)
-        init_db()
-    
     async def initialize(self):
-        """Initialize all components"""
-        logger.info("Initializing SentryCage application")
-
-        # Initialize Telegram bot
-        try:
-            await self.telegram_notifier.initialize()
-        except Exception as e:
-            logger.error(f"Failed to initialize Telegram bot: {str(e)}")
-
-        # Get latest block numbers
-        for chain in Chain:
-            try:
-                latest_block = self.blockchain_client.get_latest_block_number(chain)
-                # Start from 100 blocks before latest to catch recent transactions
-                self.last_processed_blocks[chain] = max(0, latest_block - 100)
-                logger.info(f"Starting from block {self.last_processed_blocks[chain]} on {chain.value}")
-            except Exception as e:
-                logger.error(f"Failed to get latest block for {chain.value}: {str(e)}")
-                self.last_processed_blocks[chain] = 0
-
+        await self.telegram_notifier.initialize()
+        for chain in self.settings.enabled_chains:
+            from src.fetching.explorer_api import ExplorerAPIClient
+            if self.blockchain_client.get_chain_id(chain) != ExplorerAPIClient.CHAIN_IDS[chain]:
+                raise ConnectionError('RPC chain ID does not match enabled chain')
+            latest = self.blockchain_client.get_latest_block_number(chain)
+            self.last_processed_blocks[chain] = max(0, latest - 100)
         self._log_startup_banner()
 
     def _log_startup_banner(self):
-        """Print a clean summary of what the tracker is watching at startup."""
-        active_chains = [c.value for c in Chain]
-        telegram_status = "connected" if self.telegram_notifier.enabled else "disabled (no token)"
-        ai_status = "on" if self.reasoning_agent else "off (rule-based)"
+        from src.config.wallet_registry import ALL_WALLETS
+        logger.info('SentryCage: %d static wallets; enabled chains: %s; AI: %s; Telegram: %s',
+                    len(ALL_WALLETS), ', '.join(c.value for c in self.settings.enabled_chains),
+                    ('configured; provider available, readiness unverified' if self.reasoning_agent.llm else 'configured; fallback active') if self.reasoning_agent else 'off',
+                    getattr(self.telegram_notifier, 'status', 'not verified'))
 
-        lines = [
-            "──────────────────────────────────────────────",
-            "  🐋  SentryCage — whale tracker is live",
-            "──────────────────────────────────────────────",
-            f"  Wallets   : {len(ALL_WALLETS)} tracked",
-            f"  Chains    : {', '.join(active_chains) or 'none configured'}",
-            f"  AI reason : {ai_status}",
-            f"  Telegram  : {telegram_status}",
-            f"  Poll every: {POLLING_INTERVAL}s",
-            "──────────────────────────────────────────────",
-        ]
-        logger.info("\n" + "\n".join(lines))
-    
+    async def process_new_transactions(self):
+        from src.config.wallet_registry import ALL_WALLETS
+        events = 0
+        for chain in self.settings.enabled_chains:
+            current = self.blockchain_client.get_latest_block_number(chain)
+            last = self.last_processed_blocks.get(chain, 0)
+            if current <= last:
+                continue
+            for wallet in ALL_WALLETS:
+                if chain in wallet.chains:
+                    result = await self.process_wallet_transactions(wallet.address, chain, last + 1, current)
+                    events += result.events
+            self.last_processed_blocks[chain] = current
+        return events
+
+    async def process_wallet_transactions(self, address, chain, from_block, to_block):
+        transactions = self.explorer_client.get_wallet_transactions(
+            address=address, chain=chain, start_block=from_block, end_block=to_block)
+        if len(transactions) >= 100:
+            from src.fetching.explorer_api import IncompleteExplorerScan
+            raise IncompleteExplorerScan('Explorer page full; pagination requires follow-up; cursor retained')
+        return await self.pipeline.process(transactions, chain.value, address)
+
+    async def _process_transaction_batch(self, transactions):
+        return await self.pipeline.process_analyzed(transactions)
+
     async def run_forever(self):
-        """Main application loop"""
         await self.initialize()
-        
-        logger.info("SentryCage is running")
-
         while True:
             try:
-                await self.process_new_transactions()
+                events = await self.process_new_transactions()
+                logger.info('Scan complete: %d new events', events)
+            except Exception as error:
+                # Non stampare eccezioni dei provider: possono contenere URL con credenziali.
+                logger.error('Scan failed (%s); cursor retained for incomplete chain', type(error).__name__)
+            await asyncio.sleep(self.settings.polling_interval)
 
-                next_check = datetime.now().strftime("%H:%M:%S")
-                logger.info(f"💤 Cycle complete · next check in {POLLING_INTERVAL}s (last at {next_check})")
-                await asyncio.sleep(POLLING_INTERVAL)
-            except Exception as e:
-                logger.error(f"Error in main loop: {str(e)}")
-                await asyncio.sleep(10)
-    
-    async def process_new_transactions(self):
-        """Process new transactions for all wallets"""
-        for chain in Chain:
-            try:
-                # Get current block number
-                current_block = self.blockchain_client.get_latest_block_number(chain)
-                last_block = self.last_processed_blocks.get(chain, 0)
+    async def close(self):
+        if self.reasoning_agent is not None:
+            await self.reasoning_agent.close()
+        close = getattr(self.telegram_notifier, 'close', None)
+        if close:
+            await close()
+        session = getattr(self.explorer_client, 'session', None)
+        if session:
+            session.close()
 
-                if current_block <= last_block:
-                    logger.info(f"No new blocks on {chain.value}")
-                    continue
 
-                logger.info(f"Processing blocks {last_block+1} to {current_block} on {chain.value}")
-
-                # Process each wallet
-                for wallet in ALL_WALLETS:
-                    if chain not in wallet.chains:
-                        continue
-
-                    await self.process_wallet_transactions(wallet.address, chain, last_block + 1, current_block)
-
-                # Update last processed block
-                self.last_processed_blocks[chain] = current_block
-
-            except Exception as e:
-                logger.error(f"Error processing chain {chain.value}: {str(e)}")
-    
-    async def process_wallet_transactions(self, address: str, chain: Chain, from_block: int, to_block: int):
-        """
-        Process transactions for a specific wallet
-        
-        Args:
-            address: Wallet address
-            chain: Blockchain
-            from_block: Starting block
-            to_block: Ending block
-        """
+async def main(argv=None):
+    parser = argparse.ArgumentParser(description='SentryCage — on-chain wallet monitoring')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--demo', action='store_true', help='Offline demo with synthetic data; no credentials')
+    modes.add_argument('--doctor', action='store_true', help='Read-only checks; no Telegram messages or AI inference')
+    modes.add_argument('--once', action='store_true', help='Run one scan: exit 0 empty, 10 events, 2 config error, 3 failure')
+    modes.add_argument('--test', action='store_true', help='Send one REAL Telegram message with synthetic data')
+    modes.add_argument('--preview', action='store_true', help='Send REAL synthetic Telegram sample messages')
+    args = parser.parse_args(argv)
+    if args.demo:
+        from src.orchestration.demo import run_demo
+        return await run_demo()
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    from src.config.settings import Settings, ConfigurationError
+    try:
+        if args.preview:
+            return await run_preview()
+        if args.test:
+            return await run_test()
+        settings = Settings.from_env()
+        from src.orchestration.logging_setup import configure_logging
+        configure_logging(settings)
+        if args.doctor:
+            from src.orchestration.doctor import run_doctor
+            return await run_doctor(settings)
+        tracker = WhaleTracker(settings)
         try:
-            # Get transactions from explorer API (more efficient than direct blockchain)
-            transactions = self.explorer_client.get_wallet_transactions(
-                address=address,
-                chain=chain,
-                start_block=from_block,
-                end_block=to_block
-            )
-            
-            if not transactions:
-                return
-                
-            logger.info(f"Found {len(transactions)} transactions for {address[:8]}...{address[-6:]} on {chain.value}")
-            
-            # Collect transactions for batch processing
-            batch_transactions = []
-
-            for tx in transactions:
-                # Deduplication persistente via SQLite (rimpiazza processed_txs set in-memory)
-                tx_hash = tx.get("hash", "")
-                if is_tx_processed(tx_hash, chain.value):
-                    continue
-                mark_tx_processed(tx_hash, chain.value, wallet_address=address)
-
-                # Add chain information
-                tx["chain"] = chain.value
-
-                # Analyze the transaction (for baseline)
-                analyzed_tx = self.transaction_analyzer.analyze_transaction(tx)
-
-                # Only process significant transactions
-                if analyzed_tx.get("is_significant"):
-                    batch_transactions.append(analyzed_tx)
-
-            # Process batch with AI reasoning if available
-            if batch_transactions:
-                await self._process_transaction_batch(batch_transactions)
-        
-        except Exception as e:
-            logger.error(f"Error processing wallet {address}: {str(e)}")
-
-    async def _process_transaction_batch(self, transactions: List[Dict[str, Any]]):
-        """
-        Process a batch of transactions with AI reasoning
-
-        Args:
-            transactions: List of analyzed transactions
-        """
-        try:
-            ai_available = self.reasoning_agent and self.llm_config.enable_reasoning
-
-            if ai_available:
-                logger.info(f"🤖 Using AI reasoning for {len(transactions)} transactions")
-
-                # Get AI-enhanced signals
-                enhanced_signals = await self.reasoning_agent.analyze_transactions(
-                    transactions,
-                    use_reasoning=True
-                )
-
-                # Convert to signal objects, save and send
-                for signal_data in enhanced_signals:
-                    signal = create_signal_from_analysis(signal_data, enable_reasoning=True)
-                    logger.info(f"Generated AI signal: {signal.signal_type.value} (confidence: {signal.confidence:.2f})")
-                    save_signal({**signal_data, "source": "ai_reasoning"})
-                    await self.telegram_notifier.send_signal(signal)
+            if args.once:
+                await tracker.initialize()
+                events = await tracker.process_new_transactions()
+                print(f'SCAN: success; {events} new events')
+                return 10 if events else 0
+            await tracker.run_forever()
+            return 0
+        finally:
+            await tracker.close()
+    except ConfigurationError as error:
+        print(f'CONFIG ERROR: {error}')
+        return 2
+    except Exception as error:
+        print(f'FAILED ({type(error).__name__}); run --doctor and check service configuration/connectivity')
+        return 3
 
 
-            if not ai_available:
-                # Fallback to rule-based signals
-                logger.info(f"📋 Using rule-based analysis for {len(transactions)} transactions")
-
-                for analyzed_tx in transactions:
-                    signals = self.signal_generator.generate_signals(analyzed_tx)
-
-                    for signal in signals:
-                        strategy = signal.signal_type.value
-                        tx_hash = analyzed_tx.get("hash", "unknown")
-
-                        logger.info(f"Generated signal: {strategy} for tx {tx_hash[:8]}...")
-                        save_signal({
-                            "signal_type": strategy,
-                            "source": "whale_tracker",
-                            "strength": signal.strength.value,
-                            "chain": analyzed_tx.get("chain"),
-                            "wallet_address": analyzed_tx.get("from"),
-                            "transaction_hash": tx_hash,
-                            "value_eth": analyzed_tx.get("value_eth"),
-                        })
-                        await self.telegram_notifier.send_signal(signal)
-
-        except Exception as e:
-            logger.error(f"Error in batch processing: {str(e)}")
-            # Fallback to rule-based on error
-            for analyzed_tx in transactions:
-                try:
-                    signals = self.signal_generator.generate_signals(analyzed_tx)
-                    for signal in signals:
-                        await self.telegram_notifier.send_signal(signal)
-                except Exception as signal_error:
-                    logger.error(f"Error generating fallback signal: {str(signal_error)}")
-
-async def main():
-    """Main function"""
-    parser = argparse.ArgumentParser(description="SentryCage - Monitor whale wallet activities")
-    parser.add_argument("--test", action="store_true", help="Run in test mode")
-    parser.add_argument(
-        "--preview",
-        action="store_true",
-        help="Send a gallery of sample alerts to TEST_CHAT_ID to preview Telegram formatting",
-    )
-    args = parser.parse_args()
-
-    if args.preview:
-        await run_preview()
-    elif args.test:
-        await run_test()
-    else:
-        tracker = WhaleTracker()
-        await tracker.run_forever()
-
-
-def _sample_signals() -> List[Signal]:
+def _sample_signals() -> List:
     """Build a representative gallery of alerts covering each signal type + AI reasoning."""
+    from src.signals.signal_generator import Signal, SignalType, SignalStrength
+    from src.signals.enhanced_signal import EnhancedSignal
     now = datetime.now()
     samples: List[Signal] = [
         Signal(
@@ -335,74 +211,35 @@ def _sample_signals() -> List[Signal]:
 
 
 async def run_preview():
-    """Send sample alerts to TEST_CHAT_ID so formatting can be reviewed without a live whale."""
-    logger.info("Running in preview mode — sending sample alerts")
+    """Send real synthetic alerts to the explicitly configured destination."""
+    return await send_samples(preview=True)
 
-    telegram = TelegramNotifier()
-    if not telegram.enabled:
-        logger.error("TELEGRAM_BOT_TOKEN non configurato — impossibile inviare la preview.")
-        return
-
-    chat_id = os.environ.get("TEST_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
-    if not chat_id:
-        logger.error("Né TEST_CHAT_ID né TELEGRAM_CHAT_ID impostati — non so a chi inviare la preview.")
-        return
-
-    try:
-        await telegram.initialize()
-        for signal in _sample_signals():
-            ok = await telegram.send_signal(signal, int(chat_id))
-            logger.info("Preview alert '%s' inviato: %s", signal.signal_type.value, ok)
-            await asyncio.sleep(0.3)
-        logger.info("Preview completata — controlla Telegram.")
-    except Exception as e:
-        logger.error(f"Preview fallita: {str(e)}")
 
 async def run_test():
-    """Run a test to verify all components are working"""
-    logger.info("Running in test mode")
-    
-    # Create test instances
-    explorer_client = ExplorerAPIClient()
-    analyzer = TransactionAnalyzer()
-    signal_generator = SignalGenerator()
-    telegram = TelegramNotifier()
-    
+    """Send one real synthetic alert; no RPC, explorer or LLM initialization."""
+    return await send_samples(preview=False)
+
+
+async def send_samples(preview=False):
+    from src.config.settings import required, chat_id
+    token = required(os.getenv('TELEGRAM_BOT_TOKEN', ''), 'TELEGRAM_BOT_TOKEN')
+    destination = chat_id(os.getenv('TEST_CHAT_ID') or os.getenv('TELEGRAM_CHAT_ID'))
+    from src.notifications.telegram_bot import TelegramNotifier
+    from src.orchestration.logging_setup import configure_logging
+    configure_logging(secrets=[token])
+    notifier = TelegramNotifier(token=token, chat_id=destination, enabled=True)
+    logger.warning('Sending REAL Telegram messages with synthetic data to configured test destination')
     try:
-        # Initialize Telegram bot
-        await telegram.initialize()
-        
-        # Add test subscriber (would come from command line in real usage)
-        test_chat_id = os.environ.get("TEST_CHAT_ID")
-        if test_chat_id:
-            telegram.add_subscriber(int(test_chat_id))
-        
-        # Test Telegram delivery
-        test_signal = Signal(
-            signal_type=SignalType.ACCUMULATION,
-            strength=SignalStrength.VERY_HIGH,
-            transaction_hash="0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            wallet_address="0x0123456789abcdef0123456789abcdef01234567",
-            wallet_name="Test Whale",
-            wallet_category="whale",
-            chain="ethereum",
-            value_eth=1000,
-            description="TEST SIGNAL - Whale wallet accumulating 1000.00 ETH",
-            timestamp=datetime.now(),
-            confidence=0.9,
-            tags=["test", "whale"]
-        )
-        
-        if test_chat_id:
-            success = await telegram.send_signal(test_signal, int(test_chat_id))
-            logger.info(f"Test signal sent: {success}")
-        else:
-            logger.warning("No TEST_CHAT_ID set, skipping Telegram test")
-            
-        logger.info("Test completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Test failed: {str(e)}")
+        await notifier.initialize()
+        for signal in _sample_signals() if preview else _sample_signals()[:1]:
+            signal.description = 'SYNTHETIC TEST — ' + signal.description
+            outcome = await notifier.send_signal(signal)
+            if not outcome:
+                raise ConnectionError('Telegram test delivery failed')
+        return 0
+    finally:
+        await notifier.close()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

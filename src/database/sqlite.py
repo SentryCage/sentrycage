@@ -63,11 +63,12 @@ def save_signal(signal: dict[str, Any], db_path: str = DB_PATH) -> str:
     with get_connection(db_path) as con:
         con.execute(
             """
-            INSERT OR IGNORE INTO signals
+            INSERT INTO signals
                 (id, signal_type, source, strength, confidence, chain,
                  wallet_address, transaction_hash, value_eth,
                  reasoning_chain, recommended_action, metadata, expires_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO NOTHING
             """,
             (
                 signal_id,

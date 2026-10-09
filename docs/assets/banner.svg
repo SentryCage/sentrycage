@@ -794,7 +794,7 @@
 <g><text x="66" y="278" font-size="74" font-weight="800" letter-spacing="10" fill="url(#brandGrad)">SENTRYCAGE</text></g>
 <rect x="68" y="304" width="196" height="3" fill="url(#barGrad)" rx="1.5"/>
 <text x="66" y="356" font-size="21" letter-spacing="7" font-weight="600" fill="#93A7CC">ON-CHAIN WHALE INTELLIGENCE</text>
-<text x="66" y="392" font-size="16.5" fill="#8497BD">See where big capital moves &#8212; before it becomes the price move.</text>
+<text x="66" y="392" font-size="16.5" fill="#8497BD">Observe large on-chain transfers. Understand the signal and its limits.</text>
 <g font-family="Segoe UI,Roboto,Helvetica,Arial,sans-serif" font-size="13" letter-spacing="2" font-weight="600">
 <rect x="66" y="428" width="132" height="32" rx="16" fill="none" stroke="url(#barGrad)" stroke-width="1.4" opacity="0.85"/>
 <text x="132.0" y="449" text-anchor="middle" fill="#B9C8E8">MIT LICENSE</text>

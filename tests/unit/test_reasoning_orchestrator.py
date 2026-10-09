@@ -89,7 +89,7 @@ def _make_orchestrator(llm_response, max_iters=3):
 
 
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def test_single_pass_high_confidence_stops_early():

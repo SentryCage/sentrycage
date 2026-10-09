@@ -45,8 +45,9 @@ class TransactionAnalyzer:
     # Indirizzi CEX — fonte di verità in src/config/known_addresses.py
     CEX_ADDRESSES = CEX_ADDRESSES
     
-    def __init__(self):
+    def __init__(self, threshold=TRANSACTION_THRESHOLD):
         """Initialize the transaction analyzer"""
+        self.threshold = threshold
         self.w3 = Web3()  # Used for utility functions
     
     def analyze_transaction(self, transaction: Dict[str, Any]) -> Dict[str, Any]:
@@ -76,8 +77,8 @@ class TransactionAnalyzer:
         result["type_confidence"] = confidence
         
         # Determine direction
-        from_addr = transaction.get("from", "").lower()
-        to_addr = transaction.get("to", "").lower()
+        from_addr = (transaction.get("from") or "").lower()
+        to_addr = (transaction.get("to") or "").lower()
         
         # Get wallet info if available
         from_wallet = get_wallet_by_address(from_addr)
@@ -88,7 +89,7 @@ class TransactionAnalyzer:
         
         # Determine if this is a significant transaction
         threshold = self._get_threshold(from_wallet, to_wallet)
-        result["is_significant"] = value_eth >= threshold if "value_eth" in result else False
+        result["is_significant"] = result.get("value_eth", 0) >= threshold and str(transaction.get("isError", "0")) == "0"
         result["threshold_used"] = threshold
         
         # Add direction context
@@ -116,7 +117,7 @@ class TransactionAnalyzer:
         Returns:
             Tuple of (TransactionType, confidence score)
         """
-        to_addr = transaction.get("to", "").lower()
+        to_addr = (transaction.get("to") or "").lower()
         input_data = transaction.get("input", "0x")
         
         # Simple ETH transfer
@@ -173,4 +174,4 @@ class TransactionAnalyzer:
             return to_wallet.threshold_override
             
         # Use default threshold
-        return TRANSACTION_THRESHOLD
+        return self.threshold

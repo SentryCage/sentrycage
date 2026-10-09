@@ -38,3 +38,11 @@ BUSINESS_MODEL_CANVAS.md
 
 # Local archive of files removed from the public repo — never publish
 /eliminati/
+
+# Local refactor environments and measurements
+.venv/
+.pytest_cache/
+.coverage*
+# Operational evidence is kept locally; never publish it accidentally.
+PIANO_REFACTOR.md
+REFACTOR_DELIVERY.md

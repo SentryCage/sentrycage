@@ -1,53 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-ENV/
-.venv
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-
-# Logs
-*.log
-logs/
-
-# Database
-*.db
-*.sqlite
-
-# Environment
-.env
-.env.local
-
-# Docker
-docker-compose.override.yml
-
-# Git
-.git/
-.gitignore
-
-# Memory Bank (documentation only, not needed in container)
-Memory-Bank/
-
-# Tests
-tests/
-.pytest_cache/
-.coverage
-
-# Documentation
-README.md
-*.md
-docs/
-
-# Temporary files
-*.tmp
-.cache/
+# Allow only runtime source/build inputs into the context.
+**
+!Dockerfile
+!requirements.txt
+!main.py
+!src/
+!src/**
+src/**/__pycache__/
+src/**/*.pyc

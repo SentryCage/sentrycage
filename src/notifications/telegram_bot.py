@@ -1,169 +1,90 @@
-"""
-Telegram bot for delivering trading signals to users
-"""
-import logging
+"""Telegram delivery with explicit outcomes and verified connection status."""
 import asyncio
-from typing import List, Optional
+import logging
+import os
+from enum import Enum
 from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
+from src.config.settings import chat_id as validate_chat_id
 
-from src.config.settings import TELEGRAM_BOT_TOKEN
-from src.signals.signal_generator import Signal
-
-# Configure logger
 logger = logging.getLogger(__name__)
 
+
+class DeliveryStatus(Enum):
+    SENT = 'sent'
+    NO_RECIPIENT = 'no_recipient'
+    DISABLED = 'disabled'
+    ERROR = 'error'
+
+    def __bool__(self):
+        return self is DeliveryStatus.SENT
+
+
 class TelegramNotifier:
-    """Notifier for sending signals via Telegram"""
-    
-    def __init__(self, token: Optional[str] = None):
-        """
-        Initialize the Telegram notifier
-        
-        Args:
-            token: Telegram Bot API token (defaults to TELEGRAM_BOT_TOKEN from settings)
-        """
-        self.token = token or TELEGRAM_BOT_TOKEN
-        self.enabled = bool(self.token)
-
-        if not self.enabled:
-            logger.warning(
-                "TELEGRAM_BOT_TOKEN non configurato — notifiche Telegram disabilitate. "
-                "Il sistema funzionerà senza notifiche."
-            )
-            self.bot = None
-        else:
-            self.bot = Bot(token=self.token)
-
-        # Lista chat ID per le notifiche (in produzione: da database)
-        self._subscribed_chats: List[int] = []
+    def __init__(self, token=None, chat_id=None, *, enabled=None, bot=None, timeout=10):
+        self.token = os.getenv('TELEGRAM_BOT_TOKEN', '') if token is None else token
+        self.enabled = bool(self.token) if enabled is None else enabled
+        self.timeout = timeout
+        self.bot = (bot if bot is not None else Bot(token=self.token)) if self.enabled else None
+        self.status = 'unverified' if self.enabled else 'disabled (explicit local-only mode)'
+        self._subscribed_chats = []
+        destination = os.getenv('TELEGRAM_CHAT_ID') if chat_id is None else chat_id
+        if self.enabled and destination is not None:
+            self.add_subscriber(destination)
 
     async def initialize(self):
-        """Inizializza il bot e verifica il token. No-op se disabilitato."""
         if not self.enabled:
-            logger.info("TelegramNotifier disabilitato — skip initialize")
             return
         try:
-            bot_info = await self.bot.get_me()
-            logger.info(f"Connected to Telegram as {bot_info.username}")
-        except TelegramError as e:
-            logger.error(f"Failed to initialize Telegram bot: {str(e)}")
-            raise ConnectionError(f"Telegram bot initialization failed: {str(e)}")
-    
-    def add_subscriber(self, chat_id: int):
-        """
-        Add a subscriber to receive notifications
-        
-        Args:
-            chat_id: Telegram chat ID to send messages to
-        """
-        if chat_id not in self._subscribed_chats:
-            self._subscribed_chats.append(chat_id)
-            logger.info(f"Added subscriber {chat_id}")
-    
-    def remove_subscriber(self, chat_id: int):
-        """
-        Remove a subscriber from receiving notifications
-        
-        Args:
-            chat_id: Telegram chat ID to remove
-        """
-        if chat_id in self._subscribed_chats:
-            self._subscribed_chats.remove(chat_id)
-            logger.info(f"Removed subscriber {chat_id}")
-    
-    async def send_signal(self, signal: Signal, chat_id: Optional[int] = None):
-        """
-        Send a signal to a specific chat or all subscribers
+            await asyncio.wait_for(self.bot.initialize(), timeout=self.timeout)
+        except (TelegramError, TimeoutError):
+            self.status = 'failed'
+            raise ConnectionError('Telegram token verification failed; check token and connectivity') from None
+        self.status = 'connected (get_me verified)'
 
-        Args:
-            signal: Signal to send
-            chat_id: Optional chat ID (if None, sends to all subscribers)
+    def add_subscriber(self, chat_id):
+        value = validate_chat_id(chat_id)
+        if value not in self._subscribed_chats:
+            self._subscribed_chats.append(value)
 
-        Returns:
-            Success status
-        """
+    def remove_subscriber(self, chat_id):
+        value = validate_chat_id(chat_id)
+        if value in self._subscribed_chats:
+            self._subscribed_chats.remove(value)
+
+    async def send_signal(self, signal, chat_id=None):
         if not self.enabled:
-            logger.debug("TelegramNotifier disabilitato — signal non inviato")
-            return False
-
-        message = signal.get_message()
-
+            return DeliveryStatus.DISABLED
+        destinations = [validate_chat_id(chat_id)] if chat_id is not None else self._subscribed_chats
+        if not destinations:
+            return DeliveryStatus.NO_RECIPIENT
         try:
-            if chat_id:
-                # Send to specific chat
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-                logger.info(f"Signal sent to chat {chat_id}")
-                return True
-            else:
-                # Send to all subscribers
-                for subscriber in self._subscribed_chats:
-                    await self.bot.send_message(
-                        chat_id=subscriber,
-                        text=message,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-                    # Add a small delay to avoid rate limits
-                    await asyncio.sleep(0.1)
-                
-                logger.info(f"Signal sent to {len(self._subscribed_chats)} subscribers")
-                return True
-                
-        except TelegramError as e:
-            logger.error(f"Failed to send signal: {str(e)}")
-            return False
-    
-    async def broadcast_message(self, message: str, parse_mode: Optional[str] = None):
-        """
-        Broadcast a text message to all subscribers
+            for destination in destinations:
+                await asyncio.wait_for(self.bot.send_message(
+                    chat_id=destination, text=signal.get_message(), parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True), timeout=self.timeout)
+        except (TelegramError, TimeoutError):
+            logger.error('Telegram delivery failed; signal remains saved locally')
+            return DeliveryStatus.ERROR
+        return DeliveryStatus.SENT
 
-        Args:
-            message: Message text to send
-            parse_mode: Optional parse mode (Markdown, HTML)
-
-        Returns:
-            Count of successful deliveries
-        """
+    async def broadcast_message(self, message, parse_mode=None):
         if not self.enabled:
-            logger.debug("TelegramNotifier disabilitato — broadcast non inviato")
             return 0
-
         successful = 0
-
-        for chat_id in self._subscribed_chats:
+        for destination in self._subscribed_chats:
             try:
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    parse_mode=parse_mode
-                )
+                await asyncio.wait_for(self.bot.send_message(
+                    chat_id=destination, text=message, parse_mode=parse_mode), timeout=self.timeout)
                 successful += 1
-                
-                # Add a small delay to avoid rate limits
-                await asyncio.sleep(0.1)
-                
-            except TelegramError as e:
-                logger.warning(f"Failed to send message to {chat_id}: {str(e)}")
-        
-        logger.info(f"Broadcast message sent to {successful}/{len(self._subscribed_chats)} subscribers")
+            except (TelegramError, TimeoutError):
+                logger.error('Telegram broadcast delivery failed')
         return successful
 
-    async def send_message(self, message: str, parse_mode: Optional[str] = None) -> bool:
-        """
-        Invia un messaggio a tutti i subscriber (alias conveniente per broadcast_message).
+    async def send_message(self, message, parse_mode=None):
+        return (await self.broadcast_message(message, parse_mode)) > 0
 
-        Returns:
-            True se almeno un messaggio è stato inviato, False se disabilitato o nessun subscriber.
-        """
-        if not self.enabled:
-            logger.debug("TelegramNotifier disabilitato — send_message ignorato")
-            return False
-        count = await self.broadcast_message(message, parse_mode=parse_mode)
-        return count > 0
+    async def close(self):
+        if self.bot is not None:
+            await self.bot.shutdown()

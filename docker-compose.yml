@@ -1,69 +1,48 @@
 services:
-
-  # ────────────────────────────────────────────
-  # SentryCage — whale tracker (required)
-  # ────────────────────────────────────────────
   sentrycage:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: sentrycage
+    build: .
     restart: unless-stopped
     env_file: .env
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - DB_PATH=/app/data/whale_tracker.db
+      DB_PATH: /app/data/whale_tracker.db
     volumes:
       - sentrycage-data:/app/data
-      - ./src/config/wallet_registry.py:/app/src/config/wallet_registry.py:ro
     networks:
       - sentrycage-net
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    healthcheck:
-      test: ["CMD", "python", "-c", "from src.database.sqlite import init_db; init_db()"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
 
-  # ────────────────────────────────────────────
-  # Ollama — local LLM for AI reasoning (optional)
-  # Remove this service if you use Claude/OpenAI API
-  # or if you run Ollama directly on the host.
-  # ────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
-    container_name: sentrycage-ollama
+    profiles: [ai]
     restart: unless-stopped
-    ports:
-      - "11434:11434"
     volumes:
       - ollama-data:/root/.ollama
     networks:
       - sentrycage-net
-    # GPU support (requires nvidia-container-toolkit):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
 
-  # Pulls the LLM model once on first run, then exits
   ollama-init:
     image: ollama/ollama:latest
-    container_name: sentrycage-ollama-init
-    depends_on:
-      - ollama
+    profiles: [ai]
+    depends_on: [ollama]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
     networks:
       - sentrycage-net
-    entrypoint: >
-      sh -c "
-        sleep 5 &&
-        ollama pull ${OLLAMA_MODEL:-llama3.1:8b} &&
-        echo 'Model ready.'
-      "
+    entrypoint: [sh, -c]
+    command:
+      - |
+        timeout 600 sh -c '
+          attempts=0
+          until ollama list >/dev/null 2>&1; do
+            attempts=$$((attempts + 1))
+            if [ "$$attempts" -ge 60 ]; then
+              echo "Ollama unavailable after readiness deadline" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          ollama pull "$$OLLAMA_MODEL"
+        '
     restart: "no"
 
 volumes:
@@ -72,4 +51,3 @@ volumes:
 
 networks:
   sentrycage-net:
-    driver: bridge
