@@ -154,7 +154,8 @@ queued messages remain unchanged. A wallet threshold controls significance; the 
 ## Documentation and development
 
 [Configuration and migration](docs/configuration.md) · [Architecture](docs/architecture.md) ·
-[Troubleshooting](docs/troubleshooting.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+[Troubleshooting](docs/troubleshooting.md) · [Manual testing checklist (Italian)](docs/manual-testing.md) ·
+[Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 ```bash
 .venv/bin/python -m pytest tests/ -q
