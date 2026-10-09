@@ -33,52 +33,82 @@ class WhaleTracker:
             self.llm_config = LLMConfig(self.settings.llm_env)
             self.reasoning_agent = ReasoningAgentOrchestrator(self.llm_config)
         self.storage = storage if storage is not None else SQLiteStorage(self.settings.db_path)
+        self.wallet_registry = self.storage.wallet_registry
+        self.scan_scopes = {chain: self.wallet_registry.scope(chain) for chain in self.settings.enabled_chains}
         self.pipeline = TransactionPipeline(self.storage, self.telegram_notifier,
                                             threshold=self.settings.transaction_threshold,
-                                            reasoning_agent=self.reasoning_agent)
+                                            reasoning_agent=self.reasoning_agent,
+                                            delivery_timeout=self.settings.request_timeout,
+                                            enabled_chains=[chain.value for chain in self.settings.enabled_chains])
         self.transaction_analyzer = self.pipeline.analyzer
         self.signal_generator = self.pipeline.generator
         self.last_processed_blocks = {}
 
     async def initialize(self):
         await self.telegram_notifier.initialize()
+        self.wallet_registry.reload()
         for chain in self.settings.enabled_chains:
             from src.fetching.explorer_api import ExplorerAPIClient
             if self.blockchain_client.get_chain_id(chain) != ExplorerAPIClient.CHAIN_IDS[chain]:
                 raise ConnectionError('RPC chain ID does not match enabled chain')
             latest = self.blockchain_client.get_latest_block_number(chain)
-            self.last_processed_blocks[chain] = max(0, latest - 100)
+            self.scan_scopes[chain] = self.wallet_registry.scope(chain)
+            self.last_processed_blocks[chain] = self.storage.prepare_checkpoint(
+                chain.value, self.scan_scopes[chain], max(0, latest - 100))
         self._log_startup_banner()
 
     def _log_startup_banner(self):
-        from src.config.wallet_registry import ALL_WALLETS
-        logger.info('SentryCage: %d static wallets; enabled chains: %s; AI: %s; Telegram: %s',
-                    len(ALL_WALLETS), ', '.join(c.value for c in self.settings.enabled_chains),
+        logger.info('SentryCage: %d configured wallet-chain entries; enabled chains: %s; AI: %s; Telegram: %s',
+                    sum(len(self.wallet_registry.for_chain(chain)) for chain in self.settings.enabled_chains),
+                    ', '.join(c.value for c in self.settings.enabled_chains),
                     ('configured; provider available, readiness unverified' if self.reasoning_agent.llm else 'configured; fallback active') if self.reasoning_agent else 'off',
                     getattr(self.telegram_notifier, 'status', 'not verified'))
 
     async def process_new_transactions(self):
-        from src.config.wallet_registry import ALL_WALLETS
-        events = 0
+        self.wallet_registry.reload()
+        recovered = await self.pipeline.recover([chain.value for chain in self.settings.enabled_chains], deliver=False)
+        from src.orchestration.pipeline import DeliveryError
+        try:
+            await self.pipeline.flush_notifications()
+        except DeliveryError:
+            # Acquisition can still complete locally while previously queued sends wait.
+            pass
+        events = recovered.events
         for chain in self.settings.enabled_chains:
             current = self.blockchain_client.get_latest_block_number(chain)
+            scope = self.wallet_registry.scope(chain)
+            if self.scan_scopes[chain] != scope:
+                self.last_processed_blocks[chain] = self.storage.prepare_checkpoint(
+                    chain.value, scope, max(0, current - 100))
+                self.scan_scopes[chain] = scope
             last = self.last_processed_blocks.get(chain, 0)
+            if current < last:
+                from src.fetching.explorer_api import IncompleteExplorerScan
+                raise IncompleteExplorerScan('RPC block precedes checkpoint; investigate chain reorganization or endpoint lag')
             if current <= last:
                 continue
-            for wallet in ALL_WALLETS:
-                if chain in wallet.chains:
-                    result = await self.process_wallet_transactions(wallet.address, chain, last + 1, current)
-                    events += result.events
+            for wallet in self.wallet_registry.for_chain(chain):
+                result = await self.process_wallet_transactions(wallet.address, chain, last + 1, current, deliver=False)
+                events += result.events
+            self.storage.save_checkpoint(chain.value, current, scope)
             self.last_processed_blocks[chain] = current
+        await self.pipeline.flush_notifications()
         return events
 
-    async def process_wallet_transactions(self, address, chain, from_block, to_block):
-        transactions = self.explorer_client.get_wallet_transactions(
-            address=address, chain=chain, start_block=from_block, end_block=to_block)
-        if len(transactions) >= 100:
-            from src.fetching.explorer_api import IncompleteExplorerScan
-            raise IncompleteExplorerScan('Explorer page full; pagination requires follow-up; cursor retained')
-        return await self.pipeline.process(transactions, chain.value, address)
+    async def process_wallet_transactions(self, address, chain, from_block, to_block, *, deliver=True):
+        from src.fetching.explorer_api import wallet_transaction_pages
+        from src.orchestration.pipeline import PipelineResult
+        result = PipelineResult()
+        pages = wallet_transaction_pages(
+            self.explorer_client, address, chain, from_block, to_block,
+            page_size=self.settings.explorer_page_size, max_pages=self.settings.explorer_max_pages)
+        for transactions in pages:
+            page_result = await self.pipeline.process(transactions, chain.value, address, deliver=False)
+            result.events += page_result.events
+            result.signals.extend(page_result.signals)
+        if deliver:
+            result.deliveries.extend(await self.pipeline.flush_notifications())
+        return result
 
     async def _process_transaction_batch(self, transactions):
         return await self.pipeline.process_analyzed(transactions)
@@ -91,7 +121,7 @@ class WhaleTracker:
                 logger.info('Scan complete: %d new events', events)
             except Exception as error:
                 # Non stampare eccezioni dei provider: possono contenere URL con credenziali.
-                logger.error('Scan failed (%s); cursor retained for incomplete chain', type(error).__name__)
+                logger.error('Cycle failed (%s); check scan completeness and pending notifications', type(error).__name__)
             await asyncio.sleep(self.settings.polling_interval)
 
     async def close(self):

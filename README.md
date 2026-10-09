@@ -101,11 +101,19 @@ The program is self-hosted, but live monitoring sends requests/credentials to RP
 services. Enabled cloud AI receives transaction/context data. No application account or subscription
 is required. Storage grows locally; this pilot does not promise unlimited history or retention automation.
 
-Recovery and completeness are limited: transactions are marked before analysis/delivery, block cursors
-are not persisted, startup scans roughly 100 blocks back, and there is no persistent Telegram retry queue.
-A full explorer page is treated as an incomplete scan and fails without advancing the cursor; pagination
-is follow-up work. Wallets inserted in SQLite are not used by the live static tracker/analyzer registry.
-See [architecture](docs/architecture.md) for the remaining audit/recovery work.
+Recovery uses a persistent raw-transaction journal, scan checkpoints and a notification queue.
+Signals, immutable messages and local transaction completion commit atomically before delivery.
+Interrupted analysis is retried; pending sends survive restart with bounded attempts per cycle and
+exponential waiting between retries. Changing Telegram destination leaves old messages pending.
+Notifications off pauses existing messages and keeps new signals local. `--once` returns 3 while
+notifications on enabled chains remain pending, even if acquisition committed.
+
+Scans read ascending explorer pages over a fixed block range and advance the checkpoint after every
+requested wallet finishes locally. Errors, inconsistent pages and an exhausted safety budget retain it.
+The first scan starts roughly 100 blocks back; registry changes retain unfinished previous ranges and
+also look back for new wallets. Telegram may deliver a duplicate if a send succeeds but its receipt is
+lost during a crash or timeout. Chain reorganizations and explorer omissions are not recovered or
+independently detected. See [architecture](docs/architecture.md) for recovery and migration limits.
 
 **Demo verified; live unverified.** Local tests validate the offline path and mocked delivery.
 Python 3.12.3 on Linux/WSL is verified; other Python versions, operating systems, Termux,
@@ -113,24 +121,34 @@ Docker runtime and real RPC/explorer/Telegram/AI integration are not certified b
 
 ## Customize wallets
 
-Edit the static registry in `src/config/wallet_registry.py`, preserving any defaults you still want:
+SQLite is the shared runtime wallet registry. Static examples seed it **once** on initialization;
+existing labels and thresholds are preserved. Configure the same database path used by `DB_PATH`:
 
 ```python
 from src.config.wallet_registry import WalletInfo, WalletCategory, Chain
+from src.config.runtime_wallets import WalletRegistry
+from src.database.sqlite import init_db
 
-wallet = WalletInfo(
+db_path = "./data/whale_tracker.db"  # Use your actual DB_PATH.
+init_db(db_path)
+registry = WalletRegistry(db_path)
+registry.put(WalletInfo(
     address="0x1111111111111111111111111111111111111111",
     category=WalletCategory.WHALE,
     name="My monitored wallet",
     chains=[Chain.ETHEREUM],
     threshold_override=100.0,
-)
-# Add this entry to a category list or ALL_WALLETS before WALLET_BY_ADDRESS is built.
+))
+# To stop monitoring on this chain:
+# registry.remove("0x1111111111111111111111111111111111111111", Chain.ETHEREUM)
 ```
 
 This address is an example; replace it with an address you intend to monitor.
-Restart the Python process after editing; Docker users must rebuild the image and recreate the container.
-A wallet threshold controls significance; the generator retains separate minimum amounts
+The tracker reloads wallet settings at the next cycle. Removed or inactive wallets stay removed
+across restart; editing static examples changes the seed for a fresh database. Each chain can have
+its own category, label and threshold for the same address. `threshold_override=None` follows the global
+`TRANSACTION_THRESHOLD`. Settings changes apply to future/uncompleted work; committed signals and
+queued messages remain unchanged. A wallet threshold controls significance; the generator retains minimum amounts
 (50 ETH for accumulation and 100 ETH for distribution).
 
 ## Documentation and development
@@ -143,8 +161,9 @@ A wallet threshold controls significance; the generator retains separate minimum
 .venv/bin/python -m pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=40
 ```
 
-The suite covers configuration/startup failures, raw-to-SQLite-to-Telegram mocked integration,
-AI-off behavior, offline demo, diagnostics and acquisition failures. Failures can originate in code,
+The suite covers configuration/startup, SQLite rollback and process-exit recovery, delivery leases,
+retry ambiguity, paginated acquisition, shared wallet settings, AI provenance and network-free demo.
+RPC/explorer/Telegram/AI services are simulated in these tests. Failures can originate in code,
 dependencies or the environment; reproduce and classify them before drawing a conclusion.
 Report bugs and questions through [GitHub Issues](https://github.com/SentryCage/sentrycage/issues).
 

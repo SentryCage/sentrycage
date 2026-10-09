@@ -14,6 +14,13 @@ Negative group IDs work. Choose `NOTIFICATIONS_ENABLED=false` explicitly for loc
 (the polling interval is an integer). The threshold is in native ETH; signal rules also retain
 minimum amounts of 50 ETH for accumulation and 100 ETH for distribution.
 
+`EXPLORER_PAGE_SIZE` (default 100) and `EXPLORER_MAX_PAGES` (default 1000) are
+positive integers. Scans fix the end block, request ascending pages and deduplicate
+transaction hashes. A short/empty page proves termination; repeated pages, invalid
+ordering/bounds, API errors or an exhausted page budget retain the checkpoint.
+Tune page size to your explorer service limits. The parameter contract is documented
+by [Etherscan V2 txlist](https://docs.etherscan.io/api-reference/endpoint/txlist).
+
 AI now defaults to **off**. Use `ENABLE_REASONING=true` and select `LLM_PROVIDER` explicitly to enable it.
 `ENABLE_AI_REASONING` is a deprecated alias of `ENABLE_REASONING`;
 `OLLAMA_BASE_URL` is a deprecated alias of `OLLAMA_URL`. Aliases warn and conflicting values fail.
@@ -29,6 +36,27 @@ Trading, SaaS, MongoDB, Redis and licensing variables in old templates are unuse
 - `10`: `--once` completed with new events (including events below the alert threshold).
 - `2`: invalid configuration or CLI usage; no live clients/database initialized for invalid settings.
 - `3`: runtime/service/scan/delivery failure, or doctor could not verify an enabled service.
+
+`--once` also returns 3 while sends on enabled chains remain pending (including
+retry delays, active leases or a changed recipient). Acquisition checkpoints may
+already have committed. Continuous mode retries on subsequent cycles; each flush
+claims at most 100 notifications, waits 5 seconds then doubles to at most one hour
+after failure, and bounds each send by REQUEST_TIMEOUT. Changing chat/subscribers
+leaves old messages bound to the old recipient; disabling notifications pauses them.
+
+## SQLite migration and wallets
+
+Back up an existing database before upgrading. Initialization adds recovery tables
+and wallet metadata columns without rewriting old signals or delivery history.
+Legacy markers cannot establish that old notifications were delivered.
+The first runtime initialization seeds static examples once, preserving existing
+wallet rows. Subsequent edits use WalletRegistry on the configured DB_PATH (README
+example); removal/inactivation survives restart and each chain has independent metadata.
+`threshold_override=None` follows TRANSACTION_THRESHOLD; legacy explicit thresholds
+are retained. The stored use_default_threshold flag distinguishes inherited thresholds.
+An updated registry is reloaded each cycle and gets a separate checkpoint scope;
+unfinished previous ranges are retained and new wallets get the initial lookback.
+Completed signals and queued messages retain their original content/settings.
 
 `--doctor` checks chain ID/latest block, explorer block query, Telegram token/chat access,
 and the selected local AI model listing. It never sends a message or requests inference.

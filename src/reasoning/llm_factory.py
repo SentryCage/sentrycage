@@ -53,13 +53,14 @@ class LLMFactory:
 
                 # Test availability
                 if provider.is_available():
+                    provider.runtime_provider = provider_name
                     logger.info(f"✅ Successfully initialized: {provider.get_provider_name()}")
                     return provider
                 else:
                     logger.warning(f"⚠️ Provider {provider_name} not available, trying next...")
 
             except Exception as e:
-                logger.warning(f"❌ Failed to initialize {provider_name}: {str(e)}")
+                logger.warning('Failed to initialize %s (%s)', provider_name, type(e).__name__)
                 continue
 
         # No provider available

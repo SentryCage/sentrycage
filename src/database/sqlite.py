@@ -32,6 +32,13 @@ def init_db(db_path: str = DB_PATH) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as con:
         con.executescript(_SCHEMA_PATH.read_text())
+        columns = {row[1] for row in con.execute('PRAGMA table_info(tracked_wallets)')}
+        for name, declaration in (
+            ('category', "TEXT NOT NULL DEFAULT 'whale'"), ('tags', "TEXT NOT NULL DEFAULT '[]'"),
+            ('description', 'TEXT'), ('use_default_threshold', 'INTEGER NOT NULL DEFAULT 0')
+        ):
+            if name not in columns:
+                con.execute(f'ALTER TABLE tracked_wallets ADD COLUMN {name} {declaration}')
     logger.info("Database SQLite inizializzato: %s", db_path)
 
 
@@ -58,10 +65,15 @@ def get_connection(db_path: str = DB_PATH) -> Generator[sqlite3.Connection, None
 
 def save_signal(signal: dict[str, Any], db_path: str = DB_PATH) -> str:
     """Salva un segnale. Restituisce l'id inserito."""
+    with get_connection(db_path) as con:
+        return insert_signal(con, signal)
+
+
+def insert_signal(con: sqlite3.Connection, signal: dict[str, Any]) -> str:
+    """Insert using the caller's transaction (also used by atomic recovery commits)."""
     import uuid
     signal_id = signal.get("id") or str(uuid.uuid4())
-    with get_connection(db_path) as con:
-        con.execute(
+    con.execute(
             """
             INSERT INTO signals
                 (id, signal_type, source, strength, confidence, chain,
@@ -85,7 +97,7 @@ def save_signal(signal: dict[str, Any], db_path: str = DB_PATH) -> str:
                 json.dumps(signal.get("metadata", {})),
                 signal.get("expires_at"),
             ),
-        )
+    )
     return signal_id
 
 
@@ -157,16 +169,18 @@ def add_wallet(
     label: Optional[str] = None,
     alert_threshold_eth: float = 50.0,
     db_path: str = DB_PATH,
+    *, category: str = 'whale', tags: Optional[list[str]] = None, description: Optional[str] = None,
 ) -> None:
     """Aggiunge un wallet da tracciare. No-op se esiste già."""
     with get_connection(db_path) as con:
         con.execute(
             """
             INSERT OR IGNORE INTO tracked_wallets
-                (address, chain, label, alert_threshold_eth)
-            VALUES (?, ?, ?, ?)
+                (address, chain, label, alert_threshold_eth, category, tags, description, use_default_threshold)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (address.lower(), chain, label, alert_threshold_eth),
+            (address.lower(), chain, label, 50 if alert_threshold_eth is None else alert_threshold_eth,
+             category, json.dumps(tags or []), description, int(alert_threshold_eth is None)),
         )
 
 
@@ -241,7 +255,10 @@ def cleanup_old_transactions(days: int = 30, db_path: str = DB_PATH) -> int:
     cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)).isoformat()
     with get_connection(db_path) as con:
         cur = con.execute(
-            "DELETE FROM processed_transactions WHERE processed_at < ?", (cutoff,)
+            """DELETE FROM processed_transactions WHERE processed_at < ?
+               AND NOT EXISTS (SELECT 1 FROM transaction_work w
+                               WHERE w.tx_hash = processed_transactions.tx_hash
+                                 AND w.chain = processed_transactions.chain)""", (cutoff,)
         )
     deleted = cur.rowcount
     if deleted:
@@ -305,7 +322,7 @@ def get_license_tier(db_path: str = DB_PATH) -> str:
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     """Converte una Row SQLite in dict, deserializzando i campi JSON."""
     d = dict(row)
-    for field in ("reasoning_chain", "metadata", "features"):
+    for field in ("reasoning_chain", "metadata", "features", "tags"):
         if field in d and d[field] is not None:
             try:
                 d[field] = json.loads(d[field])

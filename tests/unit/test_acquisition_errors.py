@@ -72,7 +72,7 @@ async def test_full_explorer_page_does_not_advance_cursor(tmp_path):
     blockchain = Mock()
     blockchain.get_latest_block_number.return_value = 120
     explorer = Mock()
-    explorer.get_wallet_transactions.return_value = [raw_transaction()] * 100
+    explorer.get_wallet_transactions.return_value = [dict(raw_transaction(), blockNumber='101')] * 100
     tracker = WhaleTracker(settings(tmp_path), blockchain_client=blockchain, explorer_client=explorer, recipient=Mock())
     tracker.last_processed_blocks[Chain.ETHEREUM] = 100
     with pytest.raises(IncompleteExplorerScan):

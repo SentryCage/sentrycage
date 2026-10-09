@@ -43,6 +43,7 @@ class EnhancedSignal(Signal):
         related_transactions: Optional[List[str]] = None,
         confidence: float = 0.0,
         tags: Optional[List[str]] = None,
+        provenance: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize enhanced signal
@@ -68,7 +69,8 @@ class EnhancedSignal(Signal):
             timestamp=timestamp,
             related_transactions=related_transactions,
             confidence=confidence,
-            tags=tags
+            tags=tags,
+            provenance=provenance
         )
 
         self.reasoning_chain = reasoning_chain or []
@@ -97,7 +99,8 @@ class EnhancedSignal(Signal):
         base_message = super().get_message()
 
         # Add reasoning section
-        reasoning_section = "\n\n🧠 <b>AI Reasoning</b>\n"
+        heading = 'Rule-based fallback' if self.provenance.get('origin') == 'rules_fallback' else 'AI Reasoning'
+        reasoning_section = f"\n\n🧠 <b>{heading}</b>\n"
         for i, step in enumerate(self.reasoning_chain, 1):
             reasoning_section += f"  {i}. {html.escape(step)}\n"
 
@@ -166,15 +169,15 @@ class EnhancedSignal(Signal):
             strength = SignalStrength.MEDIUM
 
         # Extract wallet info
-        wallet_name = None
-        wallet_category = "unknown"
+        wallet_name = reasoning_output.get('wallet_name')
+        wallet_category = reasoning_output.get('wallet_category', 'unknown')
         if wallet_info:
             wallet_name = wallet_info.get("name")
             wallet_category = wallet_info.get("category", "unknown")
 
         # Generate description from reasoning
         reasoning_chain = reasoning_output.get("reasoning_chain", [])
-        description = reasoning_chain[0] if reasoning_chain else "AI-detected pattern"
+        description = reasoning_output.get('description') or (reasoning_chain[0] if reasoning_chain else "AI-detected pattern")
 
         return cls(
             signal_type=signal_type,
@@ -192,7 +195,10 @@ class EnhancedSignal(Signal):
             correlations=reasoning_output.get("correlations", []),
             market_context=reasoning_output.get("market_context", {}),
             confidence=reasoning_output.get("confidence", 0.5),
-            tags=reasoning_output.get("tags", [])
+            tags=reasoning_output.get("tags", []),
+            timestamp=datetime.fromisoformat(reasoning_output['timestamp']) if reasoning_output.get('timestamp') else None,
+            related_transactions=reasoning_output.get('related_transactions', []),
+            provenance=reasoning_output.get('provenance', {})
         )
 
 
@@ -213,7 +219,11 @@ def create_signal_from_analysis(
     source = analysis.get("source", "unknown")
 
     # If from reasoning agent and has reasoning chain, create EnhancedSignal
-    if enable_reasoning and source == "reasoning_agent" and analysis.get("reasoning_chain"):
+    analysis = dict(analysis)
+    analysis.setdefault('provenance', {'schema_version': 1,
+                                     'origin': 'ai' if source == 'reasoning_agent' else 'rules_fallback',
+                                     'provider': None, 'model': None, 'analysis_fallback': source != 'reasoning_agent'})
+    if enable_reasoning and source in ('reasoning_agent', 'fallback_analyzer'):
         return EnhancedSignal.from_reasoning_output(analysis)
 
     # Otherwise create basic Signal
@@ -236,10 +246,14 @@ def create_signal_from_analysis(
         strength=strength,
         transaction_hash=analysis.get("transaction_hash", "unknown"),
         wallet_address=analysis.get("wallet_address", "unknown"),
-        wallet_name=None,
-        wallet_category="unknown",
+        wallet_name=analysis.get('wallet_name'),
+        wallet_category=analysis.get('wallet_category', 'unknown'),
         chain=analysis.get("chain", "ethereum"),
         value_eth=analysis.get("value_eth", 0),
         description=analysis.get("description", "Detected activity"),
-        confidence=analysis.get("confidence", 0.5)
+        confidence=analysis.get("confidence", 0.5),
+        timestamp=datetime.fromisoformat(analysis['timestamp']) if analysis.get('timestamp') else None,
+        related_transactions=analysis.get('related_transactions', []),
+        tags=analysis.get('tags', []),
+        provenance=analysis['provenance']
     )

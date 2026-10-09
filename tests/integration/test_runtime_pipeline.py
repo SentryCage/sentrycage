@@ -8,7 +8,7 @@ from src.orchestration.pipeline import TransactionPipeline, SQLiteStorage
 def raw_transaction():
     return {'hash': '0x' + 'ab' * 32, 'from': '0x' + '11' * 20,
             'to': ALL_WALLETS[1].address, 'value': str(500 * 10**18),
-            'input': '0x', 'timeStamp': '1791547200', 'isError': '0'}
+            'input': '0x', 'timeStamp': '1791547200', 'isError': '0', 'blockNumber': '15'}
 
 
 def settings(tmp_path):
@@ -30,7 +30,8 @@ async def test_raw_to_real_analysis_signal_and_storage(tmp_path):
     assert row['wallet_address'] == ALL_WALLETS[1].address
     assert row['confidence'] == .9
     assert row['metadata']['description'] == result.signals[0].description
-    recipient.send_signal.assert_awaited_once_with(result.signals[0])
+    recipient.send_signal.assert_awaited_once()
+    assert recipient.send_signal.await_args.args[0].get_message() == result.signals[0].get_message()
     duplicate = await pipeline.process([raw_transaction()], 'ethereum')
     assert duplicate.events == 0
 
@@ -91,7 +92,7 @@ async def test_delivery_failure_reaches_coordinator_and_is_not_retried_as_fallba
         await tracker.process_wallet_transactions(ALL_WALLETS[1].address, Chain.ETHEREUM, 10, 20)
     assert len(tracker.storage.read()) == 1
     bot.send_message.assert_awaited_once()
-    # Known recovery limitation is documented: early marking survives failure.
+    # Local completion and notification intent survive a delivery failure atomically.
     assert tracker.storage.is_processed(raw_transaction()['hash'], 'ethereum')
 
 

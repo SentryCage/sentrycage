@@ -18,6 +18,8 @@ HIGH_CONF_RESPONSE = {
         "signals": [
             {
                 "type": "accumulation",
+                "transaction_hash": SAMPLE_TX['hash'],
+                "chain": "ethereum",
                 "strength": "high",
                 "reasoning_chain": ["step1", "step2"],
                 "confidence": 0.9,
@@ -35,6 +37,8 @@ LOW_CONF_RESPONSE = {
         "signals": [
             {
                 "type": "unusual_activity",
+                "transaction_hash": SAMPLE_TX['hash'],
+                "chain": "ethereum",
                 "strength": "low",
                 "reasoning_chain": ["step1"],
                 "confidence": 0.4,

@@ -18,6 +18,10 @@ docs/configuration.md and docs/architecture.md define configuration and recovery
   and leave external blockers open. Never claim live/container validation from mocks/static checks.
 - Do not solve checkpoint/outbox/pagination limits by moving mark_tx_processed after send.
   They need separately defined recovery/duplicate semantics.
+- Recovery now commits signals/outbox/local completion atomically before sending; checkpoints
+  advance after local completeness, with delivery tracked separately. Preserve leases, recipient
+  binding and the documented duplicate ambiguity. Keep tracker/analyzer on the shared SQLite
+  wallet snapshot; static entries are seed-once examples. Preserve AI provenance and full references.
 - Preserve pre-existing edits and permissions. Keep internal evidence, runtime data and secrets
   out of commits and Docker context. Use explicit file pathspecs for local commits.
 - LOCAL_ONLY: no remotes, push, PR, release or repository settings changes without explicit

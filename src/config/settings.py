@@ -83,6 +83,8 @@ class Settings:
     request_timeout: float = 10.0
     enable_reasoning: bool = False
     llm_env: dict = field(default_factory=dict, repr=False)
+    explorer_page_size: int = 100
+    explorer_max_pages: int = 1000
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None):
@@ -122,7 +124,9 @@ class Settings:
         return cls(chains, urls, key, notifications, token, recipient, db,
                    positive(values, 'POLLING_INTERVAL', 60, int),
                    positive(values, 'TRANSACTION_THRESHOLD', 100),
-                   positive(values, 'REQUEST_TIMEOUT', 10), reasoning, values)
+                   positive(values, 'REQUEST_TIMEOUT', 10), reasoning, values,
+                   positive(values, 'EXPLORER_PAGE_SIZE', 100, int),
+                   positive(values, 'EXPLORER_MAX_PAGES', 1000, int))
 
 
 # Compatibility exports for legacy utilities. No dotenv loading or client construction.

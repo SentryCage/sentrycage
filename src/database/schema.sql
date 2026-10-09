@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS tracked_wallets (
     label               TEXT,
     alert_threshold_eth REAL NOT NULL DEFAULT 50.0,
     active              INTEGER NOT NULL DEFAULT 1,
+    category            TEXT NOT NULL DEFAULT 'whale',
+    tags                TEXT NOT NULL DEFAULT '[]',
+    description         TEXT,
+    use_default_threshold INTEGER NOT NULL DEFAULT 0,
     added_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (address, chain)
 );
@@ -61,6 +65,45 @@ CREATE TABLE IF NOT EXISTS processed_transactions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_processed_tx_time ON processed_transactions(processed_at);
+
+-- Recovery journal: completion means local results and delivery intent are committed.
+CREATE TABLE IF NOT EXISTS transaction_work (
+    tx_hash TEXT NOT NULL,
+    chain TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    wallet_address TEXT,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'completed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    PRIMARY KEY (tx_hash, chain)
+);
+
+CREATE TABLE IF NOT EXISTS scan_checkpoints (
+    chain TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    block_number INTEGER NOT NULL CHECK(block_number >= 0),
+    PRIMARY KEY (chain, scope)
+);
+
+CREATE TABLE IF NOT EXISTS scan_checkpoint_heads (
+    chain TEXT PRIMARY KEY,
+    scope TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    id TEXT PRIMARY KEY REFERENCES signals(id),
+    route TEXT NOT NULL,
+    message TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending', 'sending', 'sent', 'disabled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    next_attempt REAL NOT NULL DEFAULT 0,
+    lease_until REAL,
+    owner TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON notification_outbox(state, next_attempt);
 
 -- ============================================================
 -- USER CONFIG — configurazione locale utente

@@ -62,6 +62,7 @@ jobs:
           test ! -f .env
           python main.py --demo
           pytest tests/integration/test_offline_demo.py tests/integration/test_runtime_pipeline.py tests/integration/test_diagnostics.py tests/unit/test_runtime_settings.py tests/unit/test_telegram_delivery.py tests/unit/test_acquisition_errors.py -q
+          pytest tests/integration/test_recovery.py tests/integration/test_notification_outbox.py tests/integration/test_explorer_pagination.py tests/integration/test_wallet_registry.py tests/integration/test_signal_provenance.py -q
 
       - name: Check coverage threshold (Python 3.12 only)
         if: matrix.python-version == '3.12'

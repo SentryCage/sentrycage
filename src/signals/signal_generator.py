@@ -6,6 +6,7 @@ from typing import Dict, List, Any, Optional
 import html
 import logging
 from datetime import datetime
+from copy import deepcopy
 
 from src.analysis.transaction_analyzer import TransactionDirection
 from src.config.known_addresses import CEX_ADDRESS_LIST, get_exchange_name
@@ -65,6 +66,7 @@ class Signal:
         related_transactions: Optional[List[str]] = None,
         confidence: float = 0.0,
         tags: Optional[List[str]] = None,
+        provenance: Optional[Dict[str, Any]] = None,
     ):
         self.signal_type = signal_type
         self.strength = strength
@@ -79,6 +81,7 @@ class Signal:
         self.related_transactions = related_transactions or []
         self.confidence = confidence
         self.tags = tags or []
+        self.provenance = deepcopy(provenance or {})
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert signal to dictionary format"""
@@ -95,7 +98,8 @@ class Signal:
             "timestamp": self.timestamp.isoformat(),
             "related_transactions": self.related_transactions,
             "confidence": self.confidence,
-            "tags": self.tags
+            "tags": self.tags,
+            "provenance": deepcopy(self.provenance)
         }
     
     def get_message(self) -> str:

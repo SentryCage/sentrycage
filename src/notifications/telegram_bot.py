@@ -43,6 +43,10 @@ class TelegramNotifier:
             raise ConnectionError('Telegram token verification failed; check token and connectivity') from None
         self.status = 'connected (get_me verified)'
 
+    @property
+    def delivery_key(self):
+        return 'telegram:' + ','.join(str(chat) for chat in sorted(self._subscribed_chats)) if self.enabled else 'disabled'
+
     def add_subscriber(self, chat_id):
         value = validate_chat_id(chat_id)
         if value not in self._subscribed_chats:
@@ -56,7 +60,7 @@ class TelegramNotifier:
     async def send_signal(self, signal, chat_id=None):
         if not self.enabled:
             return DeliveryStatus.DISABLED
-        destinations = [validate_chat_id(chat_id)] if chat_id is not None else self._subscribed_chats
+        destinations = [validate_chat_id(chat_id)] if chat_id is not None else list(self._subscribed_chats)
         if not destinations:
             return DeliveryStatus.NO_RECIPIENT
         try:

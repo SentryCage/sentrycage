@@ -1,6 +1,6 @@
 """
 Wallet registry for tracking whale and market maker addresses.
-Static list is merged with wallets persisted in SQLite at runtime.
+Static examples seed the authoritative SQLite runtime registry once.
 """
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -130,36 +130,23 @@ def get_wallets_by_tag(tag: str) -> List[WalletInfo]:
 
 def _sqlite_row_to_wallet_info(row: Dict[str, Any]) -> WalletInfo:
     chain_str = row.get("chain", "ethereum").lower()
-    try:
-        chain = Chain(chain_str)
-    except ValueError:
-        chain = Chain.ETHEREUM
+    chain = Chain(chain_str)
     return WalletInfo(
         address=row["address"],
-        category=WalletCategory.WHALE,
+        category=WalletCategory(row.get('category', 'whale')),
         name=row.get("label"),
         chains=[chain],
-        threshold_override=row.get("alert_threshold_eth"),
+        tags=row.get('tags', []),
+        description=row.get('description'),
+        threshold_override=None if row.get('use_default_threshold') else row.get("alert_threshold_eth"),
     )
 
 
 def get_all_tracked_wallets(db_path: Optional[str] = None) -> List[WalletInfo]:
-    """Return union of static wallets and wallets stored in SQLite.
-
-    SQLite wallets that share an address with a static entry are skipped
-    (static entry takes precedence — richer metadata).
-    """
-    try:
-        from src.database.sqlite import get_wallets as _get_wallets, DB_PATH
-        _db = db_path or DB_PATH
-        db_rows: List[Dict[str, Any]] = _get_wallets(db_path=_db)
-    except Exception:
-        db_rows = []
-
-    static_addresses = {w.address for w in ALL_WALLETS}
-    db_wallets = [
-        _sqlite_row_to_wallet_info(row)
-        for row in db_rows
-        if row["address"] not in static_addresses
-    ]
-    return ALL_WALLETS + db_wallets
+    """Return the authoritative SQLite entries, one WalletInfo per address/chain."""
+    from src.database.sqlite import DB_PATH, init_db
+    from src.config.runtime_wallets import WalletRegistry
+    selected_path = db_path or DB_PATH
+    init_db(selected_path)
+    registry = WalletRegistry(selected_path)
+    return [wallet for chain in Chain for wallet in registry.for_chain(chain)]

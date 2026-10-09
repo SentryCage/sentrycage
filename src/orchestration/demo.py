@@ -19,6 +19,8 @@ DEMO_TRANSACTION = {
 
 
 class ConsoleRecipient:
+    delivery_key = 'console'
+
     async def send_signal(self, signal):
         print('ALERT — DEMO — dati sintetici / synthetic data')
         print(signal.get_message())

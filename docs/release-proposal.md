@@ -21,5 +21,6 @@ AI is disabled by default. Doctor performs read-only checks and once runs a sing
 Configuration migration and operational limits are in the changelog/configuration guide.
 The synthetic demo and mocked integration are verified on Python 3.12.3. Live services and container
 runtime remain unverified; this candidate does not certify complete monitoring or guaranteed delivery.
-Before stable release, define persistent checkpoints, explorer pagination, Telegram outbox/retry and
-known duplicate behavior, and audit AI attribution and persistence.
+The offline extension adds persistent recovery/checkpoints, paginated acquisition, a durable notification
+queue, shared SQLite wallets and explicit AI provenance. Ambiguous sends can duplicate; legacy data,
+chain reorganizations, automatic retention and interpretation correctness still need follow-up work.

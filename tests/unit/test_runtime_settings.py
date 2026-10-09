@@ -24,6 +24,8 @@ def test_defaults_and_negative_recipient():
     ('POLLING_INTERVAL', '0'), ('REQUEST_TIMEOUT', 'nan'),
     ('TRANSACTION_THRESHOLD', 'abc'), ('NOTIFICATIONS_ENABLED', 'yes'),
     ('ENABLE_REASONING', 'invalid'),
+    ('EXPLORER_PAGE_SIZE', '0'), ('EXPLORER_PAGE_SIZE', '1.5'),
+    ('EXPLORER_MAX_PAGES', '-1'), ('EXPLORER_MAX_PAGES', 'invalid'),
 ])
 def test_rejects_invalid_settings_without_secret_values(name, value):
     env = live_env()

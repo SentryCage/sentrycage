@@ -5,6 +5,7 @@ Coordinates LLM reasoning with analysis tools
 import asyncio
 import logging
 import json
+import math
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
@@ -16,8 +17,13 @@ from .tools.market_context_fetcher import MarketContextFetcher
 from .tools.wallet_profiler import WalletProfiler
 from src.config.llm_config import LLMConfig
 from src.analysis.transaction_analyzer import TransactionAnalyzer
+from src.signals.signal_generator import SignalGenerator, SignalType, SignalStrength
 
 logger = logging.getLogger(__name__)
+
+
+class InvalidReasoningOutput(ValueError):
+    pass
 
 
 class ReasoningAgentOrchestrator:
@@ -58,6 +64,8 @@ Respond with a JSON object containing:
   "signals": [
     {
       "type": "accumulation|distribution|exchange_deposit|exchange_withdrawal|unusual_activity",
+      "transaction_hash": "full hash of the referenced input transaction",
+      "chain": "ethereum|arbitrum",
       "strength": "low|medium|high|very_high",
       "reasoning_chain": ["step 1", "step 2", "step 3"],
       "confidence": 0.0-1.0,
@@ -84,7 +92,7 @@ Respond with a JSON object containing:
             self.llm = LLMFactory.create_provider(self.config, enable_fallback=True)
             logger.info(f"Reasoning agent initialized with {self.llm.get_provider_name()}")
         except Exception as e:
-            logger.error(f"Failed to initialize LLM provider: {str(e)}")
+            logger.error('Failed to initialize LLM provider (%s)', type(e).__name__)
             self.llm = None
 
         # Initialize components
@@ -118,12 +126,13 @@ Respond with a JSON object containing:
         """
         if not use_reasoning or not self.llm or not self.config.enable_reasoning:
             logger.info("Using rule-based fallback analysis")
-            return await self._fallback_analysis(transactions)
+            reason = 'reasoning_disabled' if not use_reasoning or not self.config.enable_reasoning else 'no_provider'
+            return await self._fallback_analysis(transactions, reason=reason)
 
         # Circuit breaker check
         if self.consecutive_failures >= self.max_failures:
             logger.warning(f"Circuit breaker active ({self.consecutive_failures} failures)")
-            return await self._fallback_analysis(transactions)
+            return await self._fallback_analysis(transactions, reason='circuit_breaker')
 
         try:
             # Run reasoning loop with timeout
@@ -135,12 +144,12 @@ Respond with a JSON object containing:
         except asyncio.TimeoutError:
             logger.warning(f"Reasoning timeout after {self.config.reasoning_timeout}s")
             self.consecutive_failures += 1
-            return await self._fallback_analysis(transactions)
+            return await self._fallback_analysis(transactions, reason='timeout')
 
         except Exception as e:
-            logger.error(f"Reasoning error: {str(e)}")
+            logger.error('Reasoning error (%s)', type(e).__name__)
             self.consecutive_failures += 1
-            return await self._fallback_analysis(transactions)
+            return await self._fallback_analysis(transactions, reason='invalid_output' if isinstance(e, InvalidReasoningOutput) else 'provider_error')
 
     async def _reasoning_loop(
         self,
@@ -182,10 +191,10 @@ Respond with a JSON object containing:
                 )
                 analysis = response.get("parsed_json", {})
             except Exception as e:
-                logger.error(f"LLM generation failed at iteration {iteration + 1}: {str(e)}")
+                logger.error('LLM generation failed at iteration %d (%s)', iteration + 1, type(e).__name__)
                 raise
 
-            new_signals = self._convert_to_signals(analysis, transactions, context)
+            new_signals = self._convert_to_signals(analysis, transactions, context, model=response.get('model'))
             signals = self._merge_signals(signals, new_signals)
 
         for signal in signals:
@@ -205,7 +214,8 @@ Respond with a JSON object containing:
         """Build a focused refinement prompt for low-confidence signals."""
         base = self._build_analysis_prompt(transactions, context)
         low_conf_summary = json.dumps(
-            [{"type": s.get("signal_type"), "confidence": s.get("confidence"),
+            [{"type": s.get("signal_type"), "transaction_hash": s.get('transaction_hash'), 'chain': s.get('chain'),
+              "confidence": s.get("confidence"),
               "reasoning": s.get("reasoning_chain", [])} for s in low_conf_signals],
             indent=2
         )
@@ -225,9 +235,9 @@ Respond with a JSON object containing:
         if not existing:
             return new_signals
 
-        merged = {(s.get("signal_type"), s.get("tx_hash")): s for s in existing}
+        merged = {(s.get("signal_type"), s.get('chain'), s.get("transaction_hash", s.get("tx_hash"))): s for s in existing}
         for sig in new_signals:
-            key = (sig.get("signal_type"), sig.get("tx_hash"))
+            key = (sig.get("signal_type"), sig.get('chain'), sig.get("transaction_hash", sig.get("tx_hash")))
             existing_conf = merged.get(key, {}).get("confidence", 0.0)
             if sig.get("confidence", 0.0) >= existing_conf:
                 merged[key] = sig
@@ -314,7 +324,7 @@ Respond with a JSON object containing:
         tx_summary = []
         for tx in transactions[:10]:  # Limit to 10 transactions
             tx_summary.append({
-                "hash": tx.get("hash", "unknown")[:16] + "...",
+                "hash": tx.get("hash", "unknown"),
                 "from": tx.get("from", "unknown")[:16] + "...",
                 "to": tx.get("to", "unknown")[:16] + "...",
                 "value_eth": tx.get("value_eth", 0),
@@ -340,7 +350,7 @@ HISTORICAL PATTERNS:
 {json.dumps({k: v.get("summary", "") for k, v in context.get("historical", {}).items()}, indent=2)}
 
 Analyze these transactions and provide:
-1. On-chain signals with detailed reasoning
+1. On-chain signals with detailed reasoning, each referencing its exact full transaction_hash and chain from the input
 2. Correlation analysis
 3. Market context relevance
 4. Predicted impact and what to watch next
@@ -357,7 +367,10 @@ Analyze these transactions and provide:
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "required": ["transaction_hash", "chain", "type", "strength", "reasoning_chain", "confidence"],
                         "properties": {
+                            "transaction_hash": {"type": "string"},
+                            "chain": {"type": "string", "enum": ["ethereum", "arbitrum"]},
                             "type": {"type": "string"},
                             "strength": {"type": "string"},
                             "reasoning_chain": {"type": "array", "items": {"type": "string"}},
@@ -376,7 +389,8 @@ Analyze these transactions and provide:
         self,
         analysis: Dict[str, Any],
         transactions: List[Dict[str, Any]],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        model: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Convert LLM analysis to enhanced signal format
@@ -391,25 +405,46 @@ Analyze these transactions and provide:
         """
         signals = []
 
-        for i, signal_data in enumerate(analysis.get("signals", [])):
-            # Distribuisce ogni segnale alla transazione corrispondente per indice.
-            # L'LLM non restituisce un riferimento esplicito all'hash (troncato nel prompt),
-            # quindi usiamo i % len per non attribuire tutti i segnali a transactions[0].
-            if transactions:
-                tx = transactions[i % len(transactions)]
-            else:
-                tx = {}
-            if len(analysis.get("signals", [])) > 1 and len(transactions) > 1:
-                logger.debug(
-                    "Signal %d attributed to tx[%d] %s (best-effort — LLM does not return tx reference)",
-                    i, i % len(transactions), tx.get("hash", "unknown")[:20]
-                )
+        if not isinstance(analysis, dict) or not isinstance(analysis.get('signals'), list):
+            raise InvalidReasoningOutput('Reasoning result must contain a signals list')
+        references = {(tx.get('chain'), tx.get('hash')): tx for tx in transactions[:10]}
+        if len(references) != len(transactions[:10]):
+            raise InvalidReasoningOutput('Ambiguous input transaction references')
+        correlations = analysis.get('correlations', [])
+        if not isinstance(correlations, list) or not all(isinstance(item, str) for item in correlations):
+            raise InvalidReasoningOutput('Invalid reasoning correlations')
+        for signal_data in analysis['signals']:
+            if not isinstance(signal_data, dict):
+                raise InvalidReasoningOutput('Invalid reasoning signal')
+            if not isinstance(signal_data.get('chain'), str) or not isinstance(signal_data.get('transaction_hash'), str):
+                raise InvalidReasoningOutput('Reasoning transaction reference must be explicit strings')
+            reference = (signal_data['chain'], signal_data['transaction_hash'])
+            if reference not in references:
+                raise InvalidReasoningOutput('Reasoning transaction reference is missing or unknown')
+            tx = references[reference]
+            confidence = signal_data.get('confidence')
+            if (not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+                    or not math.isfinite(confidence) or not 0 <= confidence <= 1):
+                raise InvalidReasoningOutput('Invalid reasoning confidence')
+            if signal_data.get('type') not in {kind.value for kind in SignalType} or signal_data.get('strength') not in {kind.value for kind in SignalStrength}:
+                raise InvalidReasoningOutput('Invalid reasoning type or strength')
+            for field in ('reasoning_chain', 'recommended_actions'):
+                values = signal_data.get(field, [])
+                if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+                    raise InvalidReasoningOutput('Invalid reasoning text fields')
+            if signal_data.get('predicted_impact', 'neutral') not in ('bullish', 'bearish', 'neutral'):
+                raise InvalidReasoningOutput('Invalid reasoning impact')
+            wallet_info = tx.get('to_wallet_info') if tx.get('direction') == 'incoming' else tx.get('from_wallet_info')
+            wallet_info = wallet_info or {}
 
             signal = {
                 "signal_type": signal_data.get("type", "unusual_activity"),
                 "strength": signal_data.get("strength", "medium"),
                 "transaction_hash": tx.get("hash", "unknown"),
-                "wallet_address": tx.get("from", "unknown"),
+                "wallet_address": wallet_info.get('address', tx.get('from', 'unknown')),
+                "wallet_name": wallet_info.get('name'),
+                "wallet_category": wallet_info.get('category', 'unknown'),
+                "tags": wallet_info.get('tags', []),
                 "chain": tx.get("chain", "ethereum"),
                 "value_eth": tx.get("value_eth", 0),
                 "reasoning_chain": signal_data.get("reasoning_chain", []),
@@ -419,7 +454,8 @@ Analyze these transactions and provide:
                 "correlations": analysis.get("correlations", []),
                 "market_context": context.get("market", {}),
                 "timestamp": datetime.now().isoformat(),
-                "source": "reasoning_agent"
+                "source": "reasoning_agent",
+                "provenance": self._provenance('ai', model=model)
             }
 
             signals.append(signal)
@@ -428,7 +464,8 @@ Analyze these transactions and provide:
 
     async def _fallback_analysis(
         self,
-        transactions: List[Dict[str, Any]]
+        transactions: List[Dict[str, Any]],
+        reason: str = 'unspecified'
     ) -> List[Dict[str, Any]]:
         """
         Fallback to rule-based analysis
@@ -444,26 +481,34 @@ Analyze these transactions and provide:
 
         for tx in transactions:
             # Use existing TransactionAnalyzer
-            analyzed = self.fallback_analyzer.analyze_transaction(tx)
-
-            if analyzed.get("is_significant"):
-                signal = {
-                    "signal_type": "transfer",
-                    "strength": "medium",
-                    "transaction_hash": tx.get("hash", "unknown"),
-                    "wallet_address": tx.get("from", "unknown"),
-                    "chain": tx.get("chain", "ethereum"),
-                    "value_eth": analyzed.get("value_eth", 0),
-                    "reasoning_chain": ["Rule-based analysis: significant transaction detected"],
-                    "confidence": 0.6,
-                    "predicted_impact": "neutral",
-                    "recommended_actions": ["Monitor for follow-up activity"],
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "fallback_analyzer"
-                }
+            analyzed = tx if 'is_significant' in tx else self.fallback_analyzer.analyze_transaction(tx)
+            for basic in SignalGenerator().generate_signals(analyzed):
+                signal = basic.to_dict()
+                signal.update(source='fallback_analyzer', reasoning_chain=['Rule-based fallback: ' + reason],
+                              predicted_impact='neutral', recommended_actions=[], correlations=[], market_context={},
+                              provenance=self._provenance('rules_fallback', reason=reason))
                 signals.append(signal)
 
         return signals
+
+    def _provenance(self, origin, *, model=None, reason=None):
+        actual = getattr(self.llm, 'runtime_provider', None)
+        actual = actual if isinstance(actual, str) and actual in ('ollama', 'lmstudio', 'claude', 'openai') else None
+        configured_model = getattr(self.llm, 'model_name', None)
+        if not isinstance(configured_model, str):
+            configured_model = getattr(self.llm, 'model', None)
+        configured_model = configured_model if isinstance(configured_model, str) else None
+        reported_model = model if isinstance(model, str) and model else None
+        requested = getattr(self.config, 'provider', None)
+        return {'schema_version': 1, 'origin': origin, 'requested_provider': requested,
+                'provider': actual if origin == 'ai' else None,
+                'model': (reported_model or configured_model) if origin == 'ai' else None,
+                'model_source': ('response' if reported_model else 'configuration' if configured_model else None) if origin == 'ai' else None,
+                'provider_fallback': actual != requested if actual is not None else None,
+                'analysis_fallback': origin == 'rules_fallback', 'fallback_reason': reason,
+                'attempted_provider': actual if origin != 'ai' else None,
+                'attempted_model': configured_model if origin != 'ai' else None,
+                'attribution': 'transaction_hash_and_chain' if origin == 'ai' else 'rule_input'}
 
     async def close(self):
         """Cleanup resources"""

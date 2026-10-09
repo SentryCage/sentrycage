@@ -45,9 +45,10 @@ class TransactionAnalyzer:
     # Indirizzi CEX — fonte di verità in src/config/known_addresses.py
     CEX_ADDRESSES = CEX_ADDRESSES
     
-    def __init__(self, threshold=TRANSACTION_THRESHOLD):
+    def __init__(self, threshold=TRANSACTION_THRESHOLD, registry=None):
         """Initialize the transaction analyzer"""
         self.threshold = threshold
+        self.registry = registry
         self.w3 = Web3()  # Used for utility functions
     
     def analyze_transaction(self, transaction: Dict[str, Any]) -> Dict[str, Any]:
@@ -81,8 +82,9 @@ class TransactionAnalyzer:
         to_addr = (transaction.get("to") or "").lower()
         
         # Get wallet info if available
-        from_wallet = get_wallet_by_address(from_addr)
-        to_wallet = get_wallet_by_address(to_addr)
+        chain = transaction.get('chain', 'ethereum')
+        from_wallet = self._lookup(from_addr, chain)
+        to_wallet = self._lookup(to_addr, chain)
         
         result["from_wallet_info"] = self._format_wallet_info(from_wallet) if from_wallet else None
         result["to_wallet_info"] = self._format_wallet_info(to_wallet) if to_wallet else None
@@ -106,6 +108,12 @@ class TransactionAnalyzer:
         result["direction"] = direction.value if direction else None
         
         return result
+
+    def _lookup(self, address, chain):
+        if self.registry is not None:
+            return self.registry.lookup(address, chain)
+        wallet = get_wallet_by_address(address)
+        return wallet if wallet and any(network.value == chain for network in wallet.chains) else None
     
     def _determine_transaction_type(self, transaction: Dict[str, Any]) -> Tuple[TransactionType, float]:
         """
